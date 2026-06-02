@@ -1,0 +1,34 @@
+.note-tts-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.note-tts-draggable-modal {
+  user-select: none;
+}
+
+.note-tts-drag-handle {
+  cursor: grab;
+  margin-bottom: 2px;
+}
+
+.note-tts-drag-handle.is-dragging {
+  cursor: grabbing;
+}
+
+.note-tts-modal audio {
+  width: 100%;
+}
+
+.note-tts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.note-tts-path {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  overflow-wrap: anywhere;
+}
