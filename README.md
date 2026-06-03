@@ -4,10 +4,15 @@ Obsidian 插件 MVP：把当前笔记或选中文本通过用户自己的 TTS AP
 
 ## 功能
 
-- 命令面板：`Convert selection or current note to speech`
-- 优先转换选中文本；没有选中文本时转换当前笔记全文
+- 命令面板：`Convert current note to speech` 和 `Convert selected text to speech`
+- 左侧栏按钮：直接转换当前整篇笔记
+- 笔记右键菜单：支持转换整篇笔记或选中文本
+- 文件菜单：支持直接转换 Markdown 文件全文，方便移动端长按文件使用
+- 命令面板：`Preview cleaned text for speech` 可预览送去 TTS 前的清洗结果
+- 设置页：可配置 frontmatter、标签、链接、裸 URL、图片/嵌入、HTML 注释和自定义跳过行规则
 - 支持 MiniMax HTTP T2A
-- 支持 Replicate prediction API
+- 支持 Replicate 官方 MiniMax Speech 2.8 Turbo preset
+- 支持 Replicate version/template 高级模式
 - 支持自定义 HTTP Provider
 - 生成文件默认保存到 `TTS Audio/`
 - 生成后弹出播放器，并可打开音频文件或复制路径
@@ -41,8 +46,22 @@ Obsidian 插件 MVP：把当前笔记或选中文本通过用户自己的 TTS AP
 在插件设置里选择 `Replicate`，填写：
 
 - `API Token`
+- `Model`：默认 `minimax/speech-2.8-turbo`
+- `Voice`：选择 MiniMax Speech 2.8 Turbo 的系统音色；选 `Custom` 时使用下一项
+- `Custom voice ID`：当 `Voice` 选择 `Custom` 时使用，用于 MiniMax voice cloning 返回的 voice_id
+- `Language preference`：默认 `Auto`
+- `Emotion`：默认 `Auto`
+
+默认模型会调用 Replicate 官方模型接口：
+
+```text
+https://api.replicate.com/v1/models/minimax/speech-2.8-turbo/predictions
+```
+
+如果要使用其他 Replicate 模型，把 `Model` 改成其他 `owner/name` 后，填写：
+
 - `Model version`：Replicate 模型版本 hash
-- `Input JSON template`：默认是：
+- `Input JSON template`：例如：
 
 ```json
 {

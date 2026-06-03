@@ -1,4 +1,5 @@
 import {
+  addIcon,
   App,
   Editor,
   Menu,
@@ -14,11 +15,63 @@ import {
 
 type ProviderId = "minimax" | "replicate" | "custom";
 
+const REPLICATE_MINIMAX_MODEL = "minimax/speech-2.8-turbo";
+const REPLICATE_CUSTOM_VOICE = "custom";
+const NOTE_TTS_NOTE_ICON = "note-tts-note";
+const NOTE_TTS_SELECTION_ICON = "note-tts-selection";
+const NOTE_TTS_PREVIEW_ICON = "note-tts-preview";
+
+const NOTE_TTS_NOTE_ICON_SVG = `
+<rect x="18" y="12" width="42" height="76" rx="8" fill="none" stroke="currentColor" stroke-width="9"/>
+<path d="M31 33h17M31 50h17M31 67h12" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M70 32c9 12 9 24 0 36M84 22c16 20 16 56 0 76" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+`;
+
+const NOTE_TTS_SELECTION_ICON_SVG = `
+<path d="M14 20h36M14 37h28M14 54h28M14 71h24" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M55 24v52M45 24h20M45 76h20" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M73 34c8 10 8 22 0 32M87 24c14 18 14 46 0 64" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+`;
+
+const NOTE_TTS_PREVIEW_ICON_SVG = `
+<rect x="14" y="12" width="42" height="76" rx="8" fill="none" stroke="currentColor" stroke-width="9"/>
+<path d="M27 34h16M27 51h12" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M48 66c8-12 17-18 28-18s20 6 28 18c-8 12-17 18-28 18s-20-6-28-18z" fill="none" stroke="currentColor" stroke-width="9" stroke-linejoin="round"/>
+<circle cx="76" cy="66" r="7" fill="currentColor"/>
+`;
+
+const REPLICATE_MINIMAX_VOICES = [
+  "Wise_Woman",
+  "Friendly_Person",
+  "Inspirational_girl",
+  "Deep_Voice_Man",
+  "Calm_Woman",
+  "Casual_Guy",
+  "Lively_Girl",
+  "Patient_Man",
+  "Young_Knight",
+  "Determined_Man",
+  "Lovely_Girl",
+  "Decent_Boy",
+  "Imposing_Manner",
+  "Elegant_Man",
+  "Abbess",
+  "Sweet_Girl_2",
+  "Exuberant_Girl",
+];
+
 interface NoteTtsSettings {
   provider: ProviderId;
   outputFolder: string;
   maxCharacters: number;
   stripMarkdown: boolean;
+  removeFrontmatter: boolean;
+  removeTags: boolean;
+  removeLinks: boolean;
+  removeUrls: boolean;
+  removeEmbeds: boolean;
+  removeHtmlComments: boolean;
+  skipLinePatterns: string;
   minimaxApiKey: string;
   minimaxModel: string;
   minimaxVoiceId: string;
@@ -28,8 +81,16 @@ interface NoteTtsSettings {
   minimaxVolume: number;
   minimaxPitch: number;
   replicateApiToken: string;
+  replicateModel: string;
   replicateVersion: string;
   replicateInputTemplate: string;
+  replicateVoiceId: string;
+  replicateCustomVoiceId: string;
+  replicateLanguageBoost: string;
+  replicateEmotion: string;
+  replicateSpeed: number;
+  replicateVolume: number;
+  replicatePitch: number;
   customEndpoint: string;
   customMethod: string;
   customHeaders: string;
@@ -44,6 +105,20 @@ const DEFAULT_SETTINGS: NoteTtsSettings = {
   outputFolder: "TTS Audio",
   maxCharacters: 10000,
   stripMarkdown: true,
+  removeFrontmatter: true,
+  removeTags: true,
+  removeLinks: true,
+  removeUrls: true,
+  removeEmbeds: true,
+  removeHtmlComments: true,
+  skipLinePatterns: [
+    "^\\*\\*来源链接：\\*\\*$",
+    "^来源链接：?$",
+    "^\\[?推文\\d*\\]?$",
+    "^\\[?[^\\]]+推文\\d*\\]?$",
+    "^(?:[^,，、\\n]*推文\\d+\\s*[,，、]?\\s*)+$",
+    "^---$",
+  ].join("\n"),
   minimaxApiKey: "",
   minimaxModel: "speech-2.8-turbo",
   minimaxVoiceId: "Chinese_Mandarin_Gentleman",
@@ -53,8 +128,16 @@ const DEFAULT_SETTINGS: NoteTtsSettings = {
   minimaxVolume: 1,
   minimaxPitch: 0,
   replicateApiToken: "",
+  replicateModel: REPLICATE_MINIMAX_MODEL,
   replicateVersion: "",
   replicateInputTemplate: "{\n  \"text\": \"{{text}}\"\n}",
+  replicateVoiceId: "Wise_Woman",
+  replicateCustomVoiceId: "",
+  replicateLanguageBoost: "None",
+  replicateEmotion: "auto",
+  replicateSpeed: 1,
+  replicateVolume: 1,
+  replicatePitch: 0,
   customEndpoint: "",
   customMethod: "POST",
   customHeaders: "{\n  \"Content-Type\": \"application/json\"\n}",
@@ -75,31 +158,37 @@ export default class NoteTtsPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    this.registerIcons();
 
-    this.addRibbonIcon("volume-2", "Convert current note to speech", async () => {
+    this.addRibbonIcon(NOTE_TTS_NOTE_ICON, "Convert current note to speech", async () => {
       await this.synthesizeActiveView("note");
     });
 
     this.addCommand({
       id: "synthesize-current-note",
       name: "Convert current note to speech",
-      checkCallback: (checking) => {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view?.file) {
-          return false;
-        }
-        if (!checking) {
-          this.synthesize(view, "note");
-        }
-        return true;
+      icon: NOTE_TTS_NOTE_ICON,
+      editorCallback: async (editor: Editor, view: MarkdownView) => {
+        await this.synthesize(view, "note", editor);
       },
     });
 
     this.addCommand({
       id: "synthesize-selection",
       name: "Convert selected text to speech",
+      icon: NOTE_TTS_SELECTION_ICON,
       editorCallback: async (editor: Editor, view: MarkdownView) => {
         await this.synthesize(view, "selection", editor);
+      },
+    });
+
+    this.addCommand({
+      id: "preview-cleaned-text",
+      name: "Preview cleaned text for speech",
+      icon: NOTE_TTS_PREVIEW_ICON,
+      editorCallback: async (editor: Editor, view: MarkdownView) => {
+        const sourceText = await this.getTextForMode(view, editor.getSelection() ? "selection" : "note", editor);
+        new CleanedTextPreviewModal(this.app, this.prepareText(sourceText)).open();
       },
     });
 
@@ -108,7 +197,7 @@ export default class NoteTtsPlugin extends Plugin {
         menu.addItem((item) => {
           item
             .setTitle("Convert current note to speech")
-            .setIcon("volume-2")
+            .setIcon(NOTE_TTS_NOTE_ICON)
             .onClick(async () => {
               await this.synthesize(view, "note", editor);
             });
@@ -116,9 +205,26 @@ export default class NoteTtsPlugin extends Plugin {
         menu.addItem((item) => {
           item
             .setTitle("Convert selected text to speech")
-            .setIcon("text-cursor-input")
+            .setIcon(NOTE_TTS_SELECTION_ICON)
             .onClick(async () => {
               await this.synthesize(view, "selection", editor);
+            });
+        });
+      })
+    );
+
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu: Menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") {
+          return;
+        }
+
+        menu.addItem((item) => {
+          item
+            .setTitle("Convert note to speech")
+            .setIcon(NOTE_TTS_NOTE_ICON)
+            .onClick(async () => {
+              await this.synthesizeFile(file);
             });
         });
       })
@@ -135,6 +241,12 @@ export default class NoteTtsPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  private registerIcons() {
+    addIcon(NOTE_TTS_NOTE_ICON, NOTE_TTS_NOTE_ICON_SVG);
+    addIcon(NOTE_TTS_SELECTION_ICON, NOTE_TTS_SELECTION_ICON_SVG);
+    addIcon(NOTE_TTS_PREVIEW_ICON, NOTE_TTS_PREVIEW_ICON_SVG);
+  }
+
   private async synthesizeActiveView(mode: "note" | "selection") {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view) {
@@ -144,34 +256,81 @@ export default class NoteTtsPlugin extends Plugin {
     await this.synthesize(view, mode, view.editor);
   }
 
+  private async synthesizeFile(file: TFile) {
+    const status = new TtsStatusModal(this.app);
+    status.open();
+    status.setStatus("正在读取笔记...");
+
+    const text = this.prepareText(await this.app.vault.read(file));
+    if (!text.trim()) {
+      status.close();
+      new Notice("没有可转换的笔记内容。");
+      return;
+    }
+
+    if (text.length > this.settings.maxCharacters) {
+      status.close();
+      new Notice(`文本超过 ${this.settings.maxCharacters} 字符，请先选中较短片段。`);
+      return;
+    }
+
+    try {
+      status.setStatus("正在请求语音模型...");
+      const audio = await this.generateAudio(text, status);
+      status.setStatus("正在保存音频文件...");
+      const saved = await this.saveAudioFile(file, audio);
+      status.setStatus("语音已生成。");
+      status.close();
+      new Notice("语音已生成。");
+      new AudioResultModal(this.app, saved).open();
+    } catch (error) {
+      console.error(error);
+      const message = error instanceof Error ? error.message : String(error);
+      status.setError(message);
+      new Notice(`生成失败：${message}`);
+    }
+  }
+
   private async synthesize(view: MarkdownView, mode: "note" | "selection", editor?: Editor) {
+    const status = new TtsStatusModal(this.app);
+    status.open();
+    status.setStatus(mode === "selection" ? "正在读取选中文本..." : "正在读取当前笔记...");
+
     const sourceText = await this.getTextForMode(view, mode, editor);
     const text = this.prepareText(sourceText);
     if (!text.trim()) {
+      status.close();
       new Notice(mode === "selection" ? "请先选择要转换的文本。" : "没有可转换的笔记内容。");
       return;
     }
 
     if (text.length > this.settings.maxCharacters) {
+      status.close();
       new Notice(`文本超过 ${this.settings.maxCharacters} 字符，请先选中较短片段。`);
       return;
     }
 
     const activeFile = view.file;
     if (!activeFile) {
+      status.close();
       new Notice("没有找到当前笔记文件。");
       return;
     }
 
     try {
-      new Notice("正在生成语音...");
-      const audio = await this.generateAudio(text);
+      status.setStatus("正在请求语音模型...");
+      const audio = await this.generateAudio(text, status);
+      status.setStatus("正在保存音频文件...");
       const saved = await this.saveAudioFile(activeFile, audio);
+      status.setStatus("语音已生成。");
+      status.close();
       new Notice("语音已生成。");
       new AudioResultModal(this.app, saved).open();
     } catch (error) {
       console.error(error);
-      new Notice(`生成失败：${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      status.setError(message);
+      new Notice(`生成失败：${message}`);
     }
   }
 
@@ -192,7 +351,36 @@ export default class NoteTtsPlugin extends Plugin {
   }
 
   private prepareText(text: string) {
-    const normalized = text.replace(/\r\n/g, "\n").trim();
+    let normalized = text.replace(/\r\n/g, "\n").trim();
+    if (this.settings.removeFrontmatter) {
+      normalized = normalized.replace(/^---\n[\s\S]*?\n---\n?/, "");
+    }
+    if (this.settings.removeHtmlComments) {
+      normalized = normalized.replace(/<!--[\s\S]*?-->/g, "");
+    }
+    if (this.settings.removeEmbeds) {
+      normalized = normalized
+        .replace(/!\[[^\]]*]\([^)]*\)/g, "")
+        .replace(/!\[\[[^\]]+]]/g, "");
+    }
+    if (this.settings.removeLinks) {
+      normalized = normalized
+        .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
+        .replace(/\[\[([^|\]]+)\|([^\]]+)]]/g, "$2")
+        .replace(/\[\[([^\]]+)]]/g, "$1");
+    }
+    if (this.settings.removeUrls) {
+      normalized = normalized.replace(/https?:\/\/\S+/g, "");
+    }
+    if (this.settings.removeTags) {
+      normalized = normalized
+        .replace(/(^|\s)#[\p{L}\p{N}_/-]+/gu, "$1")
+        .replace(/^\s*tags:\s*\[[^\]]*]\s*$/gim, "")
+        .replace(/^\s*tags:\s*.*$/gim, "");
+    }
+
+    normalized = this.removeSkippedLines(normalized);
+
     if (!this.settings.stripMarkdown) {
       return normalized;
     }
@@ -200,8 +388,6 @@ export default class NoteTtsPlugin extends Plugin {
     return normalized
       .replace(/```[\s\S]*?```/g, "")
       .replace(/`([^`]+)`/g, "$1")
-      .replace(/!\[[^\]]*]\([^)]*\)/g, "")
-      .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
       .replace(/^#{1,6}\s+/gm, "")
       .replace(/^\s*[-*+]\s+/gm, "")
       .replace(/^\s*\d+\.\s+/gm, "")
@@ -213,12 +399,37 @@ export default class NoteTtsPlugin extends Plugin {
       .trim();
   }
 
-  private async generateAudio(text: string): Promise<AudioResult> {
+  private removeSkippedLines(text: string) {
+    const patterns = this.settings.skipLinePatterns
+      .split("\n")
+      .map((pattern) => pattern.trim())
+      .filter(Boolean)
+      .map((pattern) => {
+        try {
+          return new RegExp(pattern, "iu");
+        } catch (error) {
+          console.warn(`Invalid Note TTS skip pattern: ${pattern}`, error);
+          return null;
+        }
+      })
+      .filter((pattern): pattern is RegExp => Boolean(pattern));
+
+    if (!patterns.length) {
+      return text;
+    }
+
+    return text
+      .split("\n")
+      .filter((line) => !patterns.some((pattern) => pattern.test(line.trim())))
+      .join("\n");
+  }
+
+  private async generateAudio(text: string, status?: TtsStatusModal): Promise<AudioResult> {
     if (this.settings.provider === "minimax") {
       return this.generateWithMiniMax(text);
     }
     if (this.settings.provider === "replicate") {
-      return this.generateWithReplicate(text);
+      return this.generateWithReplicate(text, status);
     }
     return this.generateWithCustomProvider(text);
   }
@@ -273,45 +484,101 @@ export default class NoteTtsPlugin extends Plugin {
     };
   }
 
-  private async generateWithReplicate(text: string): Promise<AudioResult> {
+  private async generateWithReplicate(text: string, status?: TtsStatusModal): Promise<AudioResult> {
     if (!this.settings.replicateApiToken) {
       throw new Error("请先在设置里填写 Replicate API Token。");
     }
-    if (!this.settings.replicateVersion) {
+
+    const model = this.settings.replicateModel || REPLICATE_MINIMAX_MODEL;
+    const input = this.createReplicateInput(text, model);
+    const url = this.createReplicatePredictionUrl(model);
+    const body = model === REPLICATE_MINIMAX_MODEL
+      ? { input }
+      : { version: this.settings.replicateVersion, input };
+
+    if (model !== REPLICATE_MINIMAX_MODEL && !this.settings.replicateVersion) {
       throw new Error("请先在设置里填写 Replicate 模型 version。");
     }
 
-    const input = renderJsonTemplate(this.settings.replicateInputTemplate, text);
-    let prediction = await requestUrl({
-      url: "https://api.replicate.com/v1/predictions",
+    status?.setStatus("正在提交 Replicate 任务...");
+    let prediction = await this.requestReplicateJson({
+      url,
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.settings.replicateApiToken}`,
         "Content-Type": "application/json",
-        Prefer: "wait=10",
+        Prefer: "wait=60",
       },
-      body: JSON.stringify({
-        version: this.settings.replicateVersion,
-        input,
-      }),
-    }).then((response) => response.json);
+      body: JSON.stringify(body),
+    });
 
-    prediction = await this.pollReplicatePrediction(prediction);
+    prediction = await this.pollReplicatePrediction(prediction, status);
     const outputUrl = findFirstUrl(prediction?.output);
     if (!outputUrl) {
       throw new Error("Replicate 输出里没有找到音频 URL。");
     }
 
+    status?.setStatus("正在下载音频...");
     return this.downloadAudio(outputUrl);
   }
 
-  private async pollReplicatePrediction(prediction: any) {
+  private createReplicateInput(text: string, model: string) {
+    if (model === REPLICATE_MINIMAX_MODEL) {
+      const languageBoost = this.settings.replicateLanguageBoost === "auto"
+        ? "None"
+        : this.settings.replicateLanguageBoost || "None";
+      const voiceId = this.getReplicateMiniMaxVoiceId();
+
+      return {
+        text,
+        pitch: Number.isFinite(this.settings.replicatePitch) ? this.settings.replicatePitch : 0,
+        speed: clampNumber(this.settings.replicateSpeed, 0.5, 2, 1),
+        volume: clampNumber(this.settings.replicateVolume, 0, 10, 1),
+        bitrate: 128000,
+        channel: "mono",
+        emotion: this.settings.replicateEmotion || "auto",
+        voice_id: voiceId,
+        sample_rate: 32000,
+        audio_format: "mp3",
+        language_boost: languageBoost,
+        subtitle_enable: false,
+        english_normalization: false,
+      };
+    }
+
+    return renderJsonTemplate(this.settings.replicateInputTemplate, text);
+  }
+
+  private getReplicateMiniMaxVoiceId() {
+    if (this.settings.replicateVoiceId === REPLICATE_CUSTOM_VOICE) {
+      const customVoiceId = this.settings.replicateCustomVoiceId.trim();
+      if (!customVoiceId) {
+        throw new Error("请选择一个内置音色，或填写 Custom voice ID。");
+      }
+      return customVoiceId;
+    }
+
+    return REPLICATE_MINIMAX_VOICES.includes(this.settings.replicateVoiceId)
+      ? this.settings.replicateVoiceId
+      : "Wise_Woman";
+  }
+
+  private createReplicatePredictionUrl(model: string) {
+    if (model === REPLICATE_MINIMAX_MODEL) {
+      return "https://api.replicate.com/v1/models/minimax/speech-2.8-turbo/predictions";
+    }
+
+    return "https://api.replicate.com/v1/predictions";
+  }
+
+  private async pollReplicatePrediction(prediction: any, status?: TtsStatusModal) {
     const getUrl = prediction?.urls?.get;
     if (!getUrl) {
       return prediction;
     }
 
     for (let attempt = 0; attempt < 60; attempt++) {
+      status?.setStatus(`Replicate 正在生成语音... ${prediction.status || "starting"}`);
       if (prediction.status === "succeeded" || prediction.status === "successful") {
         return prediction;
       }
@@ -320,16 +587,27 @@ export default class NoteTtsPlugin extends Plugin {
       }
 
       await sleep(1500);
-      prediction = await requestUrl({
+      prediction = await this.requestReplicateJson({
         url: getUrl,
         method: "GET",
         headers: {
           Authorization: `Bearer ${this.settings.replicateApiToken}`,
         },
-      }).then((response) => response.json);
+      });
     }
 
     throw new Error("Replicate 生成超时，请稍后重试。");
+  }
+
+  private async requestReplicateJson(options: Parameters<typeof requestUrl>[0]) {
+    try {
+      return (await requestUrl(options)).json;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const body = (error as { response?: { json?: unknown; text?: string } })?.response;
+      const detail = body?.json ? JSON.stringify(body.json) : body?.text;
+      throw new Error(detail ? `Replicate 请求失败：${detail}` : `Replicate 请求失败：${message}`);
+    }
   }
 
   private async generateWithCustomProvider(text: string): Promise<AudioResult> {
@@ -412,6 +690,65 @@ export default class NoteTtsPlugin extends Plugin {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const path = `${folder}/${basename}-${timestamp}.${audio.extension || "mp3"}`;
     return this.app.vault.createBinary(path, audio.data);
+  }
+}
+
+class TtsStatusModal extends Modal {
+  private statusEl: HTMLElement;
+  private detailEl: HTMLElement;
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("note-tts-status-modal");
+    contentEl.createEl("h2", { text: "正在生成语音" });
+    contentEl.createDiv({ cls: "note-tts-spinner" });
+    this.statusEl = contentEl.createEl("div", {
+      text: "正在准备...",
+      cls: "note-tts-status-text",
+    });
+    this.detailEl = contentEl.createEl("div", {
+      text: "请保持 Obsidian 打开，生成完成后会自动弹出播放器。",
+      cls: "note-tts-status-detail",
+    });
+  }
+
+  setStatus(message: string) {
+    if (this.statusEl) {
+      this.statusEl.setText(message);
+    }
+  }
+
+  setError(message: string) {
+    this.contentEl.removeClass("is-loading");
+    this.contentEl.addClass("has-error");
+    if (this.statusEl) {
+      this.statusEl.setText("生成失败");
+    }
+    if (this.detailEl) {
+      this.detailEl.setText(message);
+    }
+  }
+}
+
+class CleanedTextPreviewModal extends Modal {
+  private text: string;
+
+  constructor(app: App, text: string) {
+    super(app);
+    this.text = text;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("note-tts-preview-modal");
+    contentEl.createEl("h2", { text: "朗读文本预览" });
+    contentEl.createEl("textarea", {
+      text: this.text,
+      cls: "note-tts-preview-text",
+      attr: {
+        readonly: "true",
+      },
+    });
   }
 }
 
@@ -592,6 +929,20 @@ class NoteTtsSettingTab extends PluginSettingTab {
           })
       );
 
+    containerEl.createEl("h3", { text: "Text cleanup" });
+    this.toggleSetting(containerEl, "移除 YAML/frontmatter", "跳过笔记顶部的 date、type、tags 等元数据。", "removeFrontmatter");
+    this.toggleSetting(containerEl, "移除标签", "跳过 #tag 和 tags: 字段。", "removeTags");
+    this.toggleSetting(containerEl, "移除链接地址", "保留链接文字，但不朗读 URL。", "removeLinks");
+    this.toggleSetting(containerEl, "移除裸 URL", "跳过直接写在正文里的 https:// 链接。", "removeUrls");
+    this.toggleSetting(containerEl, "移除图片和嵌入", "跳过 Markdown 图片与 Obsidian 嵌入。", "removeEmbeds");
+    this.toggleSetting(containerEl, "移除 HTML 注释", "跳过 <!-- comment --> 内容。", "removeHtmlComments");
+    this.textAreaSetting(
+      containerEl,
+      "跳过整行的规则",
+      "每行一个正则表达式。匹配到的整行不会送去生成语音。",
+      "skipLinePatterns"
+    );
+
     if (this.plugin.settings.provider === "minimax") {
       this.displayMiniMaxSettings(containerEl);
     } else if (this.plugin.settings.provider === "replicate") {
@@ -616,7 +967,95 @@ class NoteTtsSettingTab extends PluginSettingTab {
   private displayReplicateSettings(containerEl: HTMLElement) {
     containerEl.createEl("h3", { text: "Replicate" });
     this.textSetting(containerEl, "API Token", "Replicate API token。", "replicateApiToken", true);
-    this.textSetting(containerEl, "Model version", "模型 version hash。", "replicateVersion");
+    this.textSetting(
+      containerEl,
+      "Model",
+      "默认使用 Replicate 官方 MiniMax Speech 2.8 Turbo；其他模型可填 owner/name。",
+      "replicateModel"
+    );
+
+    if ((this.plugin.settings.replicateModel || REPLICATE_MINIMAX_MODEL) === REPLICATE_MINIMAX_MODEL) {
+      const selectedVoice = this.plugin.settings.replicateVoiceId === REPLICATE_CUSTOM_VOICE
+        ? REPLICATE_CUSTOM_VOICE
+        : REPLICATE_MINIMAX_VOICES.includes(this.plugin.settings.replicateVoiceId)
+        ? this.plugin.settings.replicateVoiceId
+        : "Wise_Woman";
+
+      new Setting(containerEl)
+        .setName("Voice")
+        .setDesc("选择 Custom 时，会使用下一项填写的自定义 voice_id。")
+        .addDropdown((dropdown) => {
+          dropdown.addOption(REPLICATE_CUSTOM_VOICE, "Custom");
+          for (const voice of REPLICATE_MINIMAX_VOICES) {
+            dropdown.addOption(voice, voice);
+          }
+          dropdown
+            .setValue(selectedVoice)
+            .onChange(async (value) => {
+              this.plugin.settings.replicateVoiceId = value;
+              await this.plugin.saveSettings();
+            });
+        });
+
+      this.textSetting(
+        containerEl,
+        "Custom voice ID",
+        "当 Voice 选择 Custom 时使用，用于 MiniMax voice cloning 返回的 voice_id。",
+        "replicateCustomVoiceId"
+      );
+
+      new Setting(containerEl)
+        .setName("Language preference")
+        .setDesc("默认 Auto，让 MiniMax 自动判断语言。")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("None", "Auto")
+            .addOption("Chinese", "Chinese")
+            .addOption("Cantonese", "Cantonese")
+            .addOption("English", "English")
+            .addOption("Japanese", "Japanese")
+            .addOption("Korean", "Korean")
+            .addOption("Spanish", "Spanish")
+            .addOption("French", "French")
+            .addOption("German", "German")
+            .addOption("Portuguese", "Portuguese")
+            .setValue(this.plugin.settings.replicateLanguageBoost === "auto" ? "None" : this.plugin.settings.replicateLanguageBoost || "None")
+            .onChange(async (value) => {
+              this.plugin.settings.replicateLanguageBoost = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("Emotion")
+        .setDesc("默认 Auto，让 MiniMax 自动选择表达情绪。")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("auto", "Auto")
+            .addOption("neutral", "Neutral")
+            .addOption("happy", "Happy")
+            .addOption("sad", "Sad")
+            .addOption("angry", "Angry")
+            .addOption("fearful", "Fearful")
+            .addOption("disgusted", "Disgusted")
+            .addOption("surprised", "Surprised")
+            .addOption("calm", "Calm")
+            .addOption("fluent", "Fluent")
+            .setValue(this.plugin.settings.replicateEmotion || "auto")
+            .onChange(async (value) => {
+              this.plugin.settings.replicateEmotion = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      this.numberSetting(containerEl, "Speed", "语速，Replicate MiniMax 支持 0.5 到 2。", "replicateSpeed");
+      this.numberSetting(containerEl, "Volume", "音量，Replicate MiniMax 支持 0 到 10。", "replicateVolume");
+      this.numberSetting(containerEl, "Pitch", "音高，Replicate MiniMax 支持 -12 到 12。", "replicatePitch");
+      return;
+    }
+
+    containerEl.createEl("h4", { text: "Advanced Replicate model" });
+    this.textSetting(containerEl, "Model version", "非官方模型需要填写 version hash。", "replicateVersion");
     this.textAreaSetting(containerEl, "Input JSON template", "使用 {{text}} 插入笔记文本。", "replicateInputTemplate");
   }
 
@@ -659,6 +1098,18 @@ class NoteTtsSettingTab extends PluginSettingTab {
       .addText((text) =>
         text.setValue(String(this.plugin.settings[key] ?? "")).onChange(async (value) => {
           (this.plugin.settings[key] as number) = Number(value);
+          await this.plugin.saveSettings();
+        })
+      );
+  }
+
+  private toggleSetting(containerEl: HTMLElement, name: string, desc: string, key: keyof NoteTtsSettings) {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addToggle((toggle) =>
+        toggle.setValue(Boolean(this.plugin.settings[key])).onChange(async (value) => {
+          (this.plugin.settings[key] as boolean) = value;
           await this.plugin.saveSettings();
         })
       );
@@ -758,6 +1209,13 @@ function normalizeFolder(folder: string) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function clampNumber(value: number, min: number, max: number, fallback: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
 }
 
 async function ensureFolder(app: App, folder: string) {
