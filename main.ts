@@ -22,22 +22,21 @@ const NOTE_TTS_SELECTION_ICON = "note-tts-selection";
 const NOTE_TTS_PREVIEW_ICON = "note-tts-preview";
 
 const NOTE_TTS_NOTE_ICON_SVG = `
-<rect x="18" y="12" width="42" height="76" rx="8" fill="none" stroke="currentColor" stroke-width="9"/>
-<path d="M31 33h17M31 50h17M31 67h12" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
-<path d="M70 32c9 12 9 24 0 36M84 22c16 20 16 56 0 76" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<rect x="16" y="10" width="46" height="80" rx="8" fill="none" stroke="currentColor" stroke-width="9"/>
+<path d="M29 34h20M29 52h16M29 70h13" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M68 38v40l28-20z" fill="currentColor"/>
 `;
 
 const NOTE_TTS_SELECTION_ICON_SVG = `
-<path d="M14 20h36M14 37h28M14 54h28M14 71h24" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
-<path d="M55 24v52M45 24h20M45 76h20" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
-<path d="M73 34c8 10 8 22 0 32M87 24c14 18 14 46 0 64" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M14 22h52" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M40 22v50" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M24 72h32" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+<path d="M66 38v40l28-20z" fill="currentColor"/>
 `;
 
 const NOTE_TTS_PREVIEW_ICON_SVG = `
-<rect x="14" y="12" width="42" height="76" rx="8" fill="none" stroke="currentColor" stroke-width="9"/>
-<path d="M27 34h16M27 51h12" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
-<path d="M48 66c8-12 17-18 28-18s20 6 28 18c-8 12-17 18-28 18s-20-6-28-18z" fill="none" stroke="currentColor" stroke-width="9" stroke-linejoin="round"/>
-<circle cx="76" cy="66" r="7" fill="currentColor"/>
+<path d="M10 50c12-20 25-30 40-30s28 10 40 30c-12 20-25 30-40 30S22 70 10 50z" fill="none" stroke="currentColor" stroke-width="9" stroke-linejoin="round"/>
+<circle cx="50" cy="50" r="13" fill="none" stroke="currentColor" stroke-width="9"/>
 `;
 
 const REPLICATE_MINIMAX_VOICES = [
