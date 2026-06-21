@@ -1,6 +1,6 @@
 {
   "name": "obsidian-note-tts",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Convert the current Obsidian note or selection into downloadable MP3 audio with user-provided TTS APIs.",
   "main": "main.js",
   "scripts": {
@@ -18,7 +18,6 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.30",
-    "builtin-modules": "^3.3.0",
     "esbuild": "^0.20.2",
     "obsidian": "^1.5.12",
     "typescript": "^5.4.3"

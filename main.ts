@@ -63,6 +63,7 @@ interface NoteTtsSettings {
   provider: ProviderId;
   outputFolder: string;
   maxCharacters: number;
+  chunkCharacters: number;
   stripMarkdown: boolean;
   removeFrontmatter: boolean;
   removeTags: boolean;
@@ -71,6 +72,10 @@ interface NoteTtsSettings {
   removeEmbeds: boolean;
   removeHtmlComments: boolean;
   skipLinePatterns: string;
+  optimizeAcronyms: boolean;
+  addPauseAtLineBreaks: boolean;
+  lineBreakPauseType: "period" | "comma";
+  addSpaceAfterPunctuation: boolean;
   minimaxApiKey: string;
   minimaxModel: string;
   minimaxVoiceId: string;
@@ -94,6 +99,7 @@ interface NoteTtsSettings {
   customMethod: string;
   customHeaders: string;
   customBodyTemplate: string;
+  customChunkCharacters: number;
   customAudioUrlPath: string;
   customAudioHexPath: string;
   customAudioBase64Path: string;
@@ -103,6 +109,7 @@ const DEFAULT_SETTINGS: NoteTtsSettings = {
   provider: "minimax",
   outputFolder: "TTS Audio",
   maxCharacters: 10000,
+  chunkCharacters: 1200,
   stripMarkdown: true,
   removeFrontmatter: true,
   removeTags: true,
@@ -118,6 +125,10 @@ const DEFAULT_SETTINGS: NoteTtsSettings = {
     "^(?:[^,，、\\n]*推文\\d+\\s*[,，、]?\\s*)+$",
     "^---$",
   ].join("\n"),
+  optimizeAcronyms: true,
+  addPauseAtLineBreaks: true,
+  lineBreakPauseType: "period",
+  addSpaceAfterPunctuation: true,
   minimaxApiKey: "",
   minimaxModel: "speech-2.8-turbo",
   minimaxVoiceId: "Chinese_Mandarin_Gentleman",
@@ -141,19 +152,39 @@ const DEFAULT_SETTINGS: NoteTtsSettings = {
   customMethod: "POST",
   customHeaders: "{\n  \"Content-Type\": \"application/json\"\n}",
   customBodyTemplate: "{\n  \"text\": \"{{text}}\"\n}",
+  customChunkCharacters: 0,
   customAudioUrlPath: "audio_url",
   customAudioHexPath: "",
   customAudioBase64Path: "",
 };
 
 interface AudioResult {
-  data: ArrayBuffer;
+  data?: ArrayBuffer;
   extension: string;
   mimeType: string;
+  vaultPath?: string;
+}
+
+interface PendingTtsTask {
+  id: string;
+  sourcePath: string;
+  statusUrl: string;
+  audioUrl?: string;
+  headers: Record<string, string>;
+  created: number;
+  textLength: number;
+}
+
+class PendingTaskError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PendingTaskError";
+  }
 }
 
 export default class NoteTtsPlugin extends Plugin {
   settings: NoteTtsSettings;
+  pendingTasks: PendingTtsTask[] = [];
 
   async onload() {
     await this.loadSettings();
@@ -188,6 +219,15 @@ export default class NoteTtsPlugin extends Plugin {
       editorCallback: async (editor: Editor, view: MarkdownView) => {
         const sourceText = await this.getTextForMode(view, editor.getSelection() ? "selection" : "note", editor);
         new CleanedTextPreviewModal(this.app, this.prepareText(sourceText)).open();
+      },
+    });
+
+    this.addCommand({
+      id: "check-pending-tts-tasks",
+      name: "Check pending speech tasks",
+      icon: NOTE_TTS_NOTE_ICON,
+      callback: async () => {
+        await this.checkPendingTasks();
       },
     });
 
@@ -233,11 +273,13 @@ export default class NoteTtsPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    this.pendingTasks = Array.isArray(data?.pendingTasks) ? data.pendingTasks : [];
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.saveData({ ...this.settings, pendingTasks: this.pendingTasks });
   }
 
   private registerIcons() {
@@ -275,7 +317,7 @@ export default class NoteTtsPlugin extends Plugin {
 
     try {
       status.setStatus("正在请求语音模型...");
-      const audio = await this.generateAudio(text, status);
+      const audio = await this.generateAudio(text, status, file);
       status.setStatus("正在保存音频文件...");
       const saved = await this.saveAudioFile(file, audio);
       status.setStatus("语音已生成。");
@@ -283,6 +325,11 @@ export default class NoteTtsPlugin extends Plugin {
       new Notice("语音已生成。");
       new AudioResultModal(this.app, saved).open();
     } catch (error) {
+      if (error instanceof PendingTaskError) {
+        status.close();
+        new Notice(error.message, 10000);
+        return;
+      }
       console.error(error);
       const message = error instanceof Error ? error.message : String(error);
       status.setError(message);
@@ -318,7 +365,7 @@ export default class NoteTtsPlugin extends Plugin {
 
     try {
       status.setStatus("正在请求语音模型...");
-      const audio = await this.generateAudio(text, status);
+      const audio = await this.generateAudio(text, status, activeFile);
       status.setStatus("正在保存音频文件...");
       const saved = await this.saveAudioFile(activeFile, audio);
       status.setStatus("语音已生成。");
@@ -326,6 +373,11 @@ export default class NoteTtsPlugin extends Plugin {
       new Notice("语音已生成。");
       new AudioResultModal(this.app, saved).open();
     } catch (error) {
+      if (error instanceof PendingTaskError) {
+        status.close();
+        new Notice(error.message, 10000);
+        return;
+      }
       console.error(error);
       const message = error instanceof Error ? error.message : String(error);
       status.setError(message);
@@ -369,7 +421,7 @@ export default class NoteTtsPlugin extends Plugin {
         .replace(/\[\[([^\]]+)]]/g, "$1");
     }
     if (this.settings.removeUrls) {
-      normalized = normalized.replace(/https?:\/\/\S+/g, "");
+      normalized = normalized.replace(/https?:\/\/\S+|www\.\S+/g, "");
     }
     if (this.settings.removeTags) {
       normalized = normalized
@@ -380,22 +432,48 @@ export default class NoteTtsPlugin extends Plugin {
 
     normalized = this.removeSkippedLines(normalized);
 
-    if (!this.settings.stripMarkdown) {
-      return normalized;
+    let cleaned = normalized;
+    if (this.settings.stripMarkdown) {
+      cleaned = normalized
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/^#{1,6}\s+/gm, "")
+        .replace(/^\s*[-*+]\s+/gm, "")
+        .replace(/^\s*\d+\.\s+/gm, "")
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/\*([^*]+)\*/g, "$1")
+        .replace(/__([^_]+)__/g, "$1")
+        .replace(/_([^_]+)_/g, "$1")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
     }
 
-    return normalized
-      .replace(/```[\s\S]*?```/g, "")
-      .replace(/`([^`]+)`/g, "$1")
-      .replace(/^#{1,6}\s+/gm, "")
-      .replace(/^\s*[-*+]\s+/gm, "")
-      .replace(/^\s*\d+\.\s+/gm, "")
-      .replace(/\*\*([^*]+)\*\*/g, "$1")
-      .replace(/\*([^*]+)\*/g, "$1")
-      .replace(/__([^_]+)__/g, "$1")
-      .replace(/_([^_]+)_/g, "$1")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
+    if (this.settings.addPauseAtLineBreaks) {
+      const pauseChar = this.settings.lineBreakPauseType === "comma" ? "，" : "。";
+      const punctuationRegex = /[。！？，；：、”’）〕】〉》.!?,;:"')\]>]$/;
+      cleaned = cleaned
+        .split("\n")
+        .map((line) => {
+          const trimmed = line.trim();
+          if (trimmed && !punctuationRegex.test(trimmed)) {
+            return line + pauseChar;
+          }
+          return line;
+        })
+        .join("\n");
+    }
+
+    if (this.settings.optimizeAcronyms) {
+      cleaned = cleaned.replace(/\b[A-Z]{2,}\b/g, (match) => {
+        return match.split("").join(" ");
+      });
+    }
+
+    if (this.settings.addSpaceAfterPunctuation) {
+      cleaned = cleaned.replace(/([。！？，；：、.!?,;:])(?![ \t\n\r])/g, "$1 ");
+    }
+
+    return cleaned;
   }
 
   private removeSkippedLines(text: string) {
@@ -423,21 +501,45 @@ export default class NoteTtsPlugin extends Plugin {
       .join("\n");
   }
 
-  private async generateAudio(text: string, status?: TtsStatusModal): Promise<AudioResult> {
+  private async generateAudio(text: string, status?: TtsStatusModal, sourceFile?: TFile): Promise<AudioResult> {
     if (this.settings.provider === "minimax") {
-      return this.generateWithMiniMax(text);
+      return this.generateWithMiniMax(text, status);
     }
     if (this.settings.provider === "replicate") {
       return this.generateWithReplicate(text, status);
     }
-    return this.generateWithCustomProvider(text);
+    return this.generateWithCustomProvider(text, status, sourceFile);
   }
 
-  private async generateWithMiniMax(text: string): Promise<AudioResult> {
+  private async generateWithMiniMax(text: string, status?: TtsStatusModal): Promise<AudioResult> {
     if (!this.settings.minimaxApiKey) {
       throw new Error("请先在设置里填写 MiniMax API Key。");
     }
 
+    const chunkCharacters = Number(this.settings.chunkCharacters) || 0;
+    if (chunkCharacters > 0 && text.length > chunkCharacters) {
+      return this.generateWithMiniMaxChunks(text, chunkCharacters, status);
+    }
+
+    return this.requestMiniMaxAudio(text);
+  }
+
+  private async generateWithMiniMaxChunks(text: string, chunkCharacters: number, status?: TtsStatusModal): Promise<AudioResult> {
+    const chunks = splitTextForTts(text, Math.max(80, chunkCharacters));
+    if (chunks.length <= 1) {
+      return this.requestMiniMaxAudio(text);
+    }
+
+    const audios: AudioResult[] = [];
+    for (let index = 0; index < chunks.length; index++) {
+      status?.setStatus(`MiniMax 正在生成分段 ${index + 1}/${chunks.length}...`);
+      audios.push(await this.requestMiniMaxAudio(chunks[index]));
+    }
+
+    return combineAudioResults(audios, "MiniMax");
+  }
+
+  private async requestMiniMaxAudio(text: string): Promise<AudioResult> {
     const response = await requestUrl({
       url: this.settings.minimaxEndpoint,
       method: "POST",
@@ -453,9 +555,9 @@ export default class NoteTtsPlugin extends Plugin {
         language_boost: this.settings.minimaxLanguageBoost || "auto",
         voice_setting: {
           voice_id: this.settings.minimaxVoiceId,
-          speed: this.settings.minimaxSpeed,
-          vol: this.settings.minimaxVolume,
-          pitch: this.settings.minimaxPitch,
+          speed: Math.round(this.settings.minimaxSpeed),
+          vol: Math.round(this.settings.minimaxVolume),
+          pitch: Math.round(this.settings.minimaxPitch),
         },
         audio_setting: {
           sample_rate: 32000,
@@ -488,6 +590,30 @@ export default class NoteTtsPlugin extends Plugin {
       throw new Error("请先在设置里填写 Replicate API Token。");
     }
 
+    const chunkCharacters = Number(this.settings.chunkCharacters) || 0;
+    if (chunkCharacters > 0 && text.length > chunkCharacters) {
+      return this.generateWithReplicateChunks(text, chunkCharacters, status);
+    }
+
+    return this.requestReplicateAudio(text, status);
+  }
+
+  private async generateWithReplicateChunks(text: string, chunkCharacters: number, status?: TtsStatusModal): Promise<AudioResult> {
+    const chunks = splitTextForTts(text, Math.max(80, chunkCharacters));
+    if (chunks.length <= 1) {
+      return this.requestReplicateAudio(text, status);
+    }
+
+    const audios: AudioResult[] = [];
+    for (let index = 0; index < chunks.length; index++) {
+      status?.setStatus(`Replicate 正在生成分段 ${index + 1}/${chunks.length}...`);
+      audios.push(await this.requestReplicateAudio(chunks[index], status));
+    }
+
+    return combineAudioResults(audios, "Replicate");
+  }
+
+  private async requestReplicateAudio(text: string, status?: TtsStatusModal): Promise<AudioResult> {
     const model = this.settings.replicateModel || REPLICATE_MINIMAX_MODEL;
     const input = this.createReplicateInput(text, model);
     const url = this.createReplicatePredictionUrl(model);
@@ -609,35 +735,76 @@ export default class NoteTtsPlugin extends Plugin {
     }
   }
 
-  private async generateWithCustomProvider(text: string): Promise<AudioResult> {
+  private async generateWithCustomProvider(text: string, status?: TtsStatusModal, sourceFile?: TFile): Promise<AudioResult> {
     if (!this.settings.customEndpoint) {
       throw new Error("请先填写自定义 Provider Endpoint。");
     }
 
+    const chunkCharacters = Number(this.settings.customChunkCharacters) || 0;
+    if (chunkCharacters > 0 && text.length > chunkCharacters) {
+      return this.generateWithCustomProviderChunks(text, chunkCharacters, status);
+    }
+
+    return this.requestCustomProviderAudio(text, status, sourceFile);
+  }
+
+  private async generateWithCustomProviderChunks(text: string, chunkCharacters: number, status?: TtsStatusModal): Promise<AudioResult> {
+    const chunks = splitTextForTts(text, Math.max(80, chunkCharacters));
+    if (chunks.length <= 1) {
+      return this.requestCustomProviderAudio(text, status);
+    }
+
+    const audios: AudioResult[] = [];
+    for (let index = 0; index < chunks.length; index++) {
+      status?.setStatus(`正在生成分段 ${index + 1}/${chunks.length}...`);
+      audios.push(await this.requestCustomProviderAudio(chunks[index], status));
+    }
+
+    return combineAudioResults(audios, "Custom");
+  }
+
+  private async requestCustomProviderAudio(text: string, status?: TtsStatusModal, sourceFile?: TFile): Promise<AudioResult> {
     const headers = renderJsonTemplate(this.settings.customHeaders || "{}", text);
     const body = this.settings.customBodyTemplate
-      ? JSON.stringify(renderJsonTemplate(this.settings.customBodyTemplate, text))
+      ? JSON.stringify({
+          ...renderJsonTemplate(this.settings.customBodyTemplate, text),
+          filename: sourceFile?.basename || "Note TTS",
+        })
       : undefined;
 
-    const response = await requestUrl({
-      url: this.settings.customEndpoint,
-      method: this.settings.customMethod || "POST",
-      headers,
-      body,
-    });
+    status?.setStatus("正在提交本地语音任务...");
+    const response = await requestUrlWithRetries(
+      {
+        url: this.settings.customEndpoint,
+        method: this.settings.customMethod || "POST",
+        headers,
+        body,
+      },
+      {
+        attempts: 5,
+        baseDelayMs: 2000,
+        onRetry: (attempt) => status?.setStatus(`提交请求超时，正在重试... ${attempt}/5`),
+      }
+    );
 
-    if (response.arrayBuffer?.byteLength && !looksLikeJson(response.headers?.["content-type"])) {
+    const contentType = getHeader(response.headers, "content-type");
+    if (response.arrayBuffer?.byteLength && !looksLikeJson(contentType)) {
+      const mimeType = contentType || (looksLikeWav(response.arrayBuffer) ? "audio/wav" : "audio/mpeg");
       return {
         data: response.arrayBuffer,
-        extension: "mp3",
-        mimeType: response.headers?.["content-type"] || "audio/mpeg",
+        extension: extensionFromMime(mimeType),
+        mimeType,
       };
     }
 
     const payload = response.json;
+    if (payload?.task_id || payload?.status_url) {
+      return this.pollCustomProviderTask(payload, headers, status, sourceFile, text.length);
+    }
+
     const audioUrl = getByPath(payload, this.settings.customAudioUrlPath);
     if (typeof audioUrl === "string" && audioUrl) {
-      return this.downloadAudio(audioUrl);
+      return this.downloadAudio(audioUrl, headers);
     }
 
     const audioHex = getByPath(payload, this.settings.customAudioHexPath);
@@ -661,7 +828,205 @@ export default class NoteTtsPlugin extends Plugin {
     throw new Error("自定义 Provider 响应中没有找到音频数据。");
   }
 
-  private async downloadAudio(url: string): Promise<AudioResult> {
+  private async pollCustomProviderTask(
+    payload: any,
+    headers: Record<string, string>,
+    status?: TtsStatusModal,
+    sourceFile?: TFile,
+    textLength = 0
+  ): Promise<AudioResult> {
+    const statusUrl = payload?.status_url;
+    if (typeof statusUrl !== "string" || !statusUrl) {
+      throw new Error("Custom 异步任务缺少 status_url。");
+    }
+    const pending = sourceFile
+      ? await this.rememberPendingTask(payload, headers, sourceFile, statusUrl, textLength)
+      : null;
+
+    let transientFailures = 0;
+    for (let attempt = 0; attempt < 240; attempt++) {
+      status?.setStatus(`Mac mini 正在生成语音... ${attempt + 1}`);
+      await sleep(5000);
+
+      let task: any;
+      try {
+        const response = await requestUrlWithRetries(
+          {
+            url: statusUrl,
+            method: "GET",
+            headers,
+          },
+          { attempts: 2, baseDelayMs: 1200 }
+        );
+        transientFailures = 0;
+        task = response.json;
+      } catch (error) {
+        transientFailures += 1;
+        if (transientFailures >= 120) {
+          throw new Error(`等待本地语音任务时连接连续中断：${errorMessage(error)}`);
+        }
+        status?.setStatus(`连接暂时中断，继续等待... ${transientFailures}/120`);
+        continue;
+      }
+
+      if (task?.status === "succeeded") {
+        const vaultPath = typeof task?.vault_path === "string" ? task.vault_path : undefined;
+        if (vaultPath) {
+          if (pending) {
+            this.removePendingTask(pending.id);
+            await this.saveSettings();
+          }
+          status?.setStatus("语音已保存到 iCloud，正在等待手机同步...");
+          return {
+            vaultPath,
+            extension: extensionFromPath(vaultPath),
+            mimeType: mimeFromExtension(extensionFromPath(vaultPath)),
+          };
+        }
+
+        const audioUrl = task?.audio_url || payload?.audio_url;
+        if (typeof audioUrl !== "string" || !audioUrl) {
+          throw new Error("Custom 异步任务完成但缺少 audio_url。");
+        }
+        if (pending) {
+          this.removePendingTask(pending.id);
+          await this.saveSettings();
+        }
+        status?.setStatus("语音已生成，正在下载...");
+        return this.downloadAudio(audioUrl, headers, status, numericValue(task?.m4a_bytes || task?.audio_bytes));
+      }
+      if (task?.status === "failed") {
+        if (pending) {
+          this.removePendingTask(pending.id);
+          await this.saveSettings();
+        }
+        throw new Error(task?.error || "Custom 异步任务失败。");
+      }
+    }
+
+    throw new Error("Custom 异步任务超时。");
+  }
+
+  private async rememberPendingTask(
+    payload: any,
+    headers: Record<string, string>,
+    sourceFile: TFile,
+    statusUrl: string,
+    textLength: number
+  ) {
+    const id = String(payload?.task_id || statusUrl);
+    const existing = this.pendingTasks.find((task) => task.id === id);
+    if (existing) {
+      return existing;
+    }
+
+    const task: PendingTtsTask = {
+      id,
+      sourcePath: sourceFile.path,
+      statusUrl,
+      audioUrl: typeof payload?.audio_url === "string" ? payload.audio_url : undefined,
+      headers,
+      created: Date.now(),
+      textLength,
+    };
+    this.pendingTasks.push(task);
+    await this.saveSettings();
+    return task;
+  }
+
+  private removePendingTask(id: string) {
+    this.pendingTasks = this.pendingTasks.filter((task) => task.id !== id);
+  }
+
+  private async checkPendingTasks() {
+    if (!this.pendingTasks.length) {
+      new Notice("没有待下载的语音任务。");
+      return;
+    }
+
+    const status = new TtsStatusModal(this.app);
+    status.open();
+    let completed = 0;
+    let stillProcessing = 0;
+    let lastSaved: TFile | null = null;
+
+    for (const task of [...this.pendingTasks]) {
+      status.setStatus(`正在检查语音任务... ${completed + stillProcessing + 1}/${this.pendingTasks.length}`);
+      try {
+        const response = await requestUrlWithRetries(
+          {
+            url: task.statusUrl,
+            method: "GET",
+            headers: task.headers,
+          },
+          { attempts: 4, baseDelayMs: 1500, errorPrefix: "检查语音任务失败" }
+        );
+        const payload = response.json;
+        if (payload?.status === "failed") {
+          this.removePendingTask(task.id);
+          console.warn("Pending Note TTS task failed:", payload?.error || task.id);
+          continue;
+        }
+        if (payload?.status !== "succeeded") {
+          stillProcessing += 1;
+          continue;
+        }
+
+        const vaultPath = typeof payload?.vault_path === "string" ? payload.vault_path : undefined;
+        if (vaultPath) {
+          const source = await this.waitForVaultFile(vaultPath, status, 15000);
+          if (source) {
+            lastSaved = source;
+            completed += 1;
+          } else {
+            new Notice(`语音已保存在 Mac mini 的 iCloud：${vaultPath}`);
+            stillProcessing += 1;
+          }
+          this.removePendingTask(task.id);
+          continue;
+        }
+
+        const audioUrl = payload?.audio_url || task.audioUrl;
+        if (typeof audioUrl !== "string" || !audioUrl) {
+          throw new Error("语音任务已完成但缺少 audio_url。");
+        }
+
+        status.setStatus("正在下载已完成的语音...");
+        const audio = await this.downloadAudio(audioUrl, task.headers, status, numericValue(payload?.m4a_bytes || payload?.audio_bytes));
+        const source = this.app.vault.getAbstractFileByPath(task.sourcePath);
+        if (!(source instanceof TFile)) {
+          throw new Error(`找不到原始笔记：${task.sourcePath}`);
+        }
+
+        lastSaved = await this.saveAudioFile(source, audio);
+        this.removePendingTask(task.id);
+        completed += 1;
+      } catch (error) {
+        console.error(error);
+        stillProcessing += 1;
+      }
+    }
+
+    await this.saveSettings();
+    status.close();
+
+    if (completed > 0) {
+      new Notice(`已下载 ${completed} 个语音文件。`);
+      if (lastSaved) {
+        new AudioResultModal(this.app, lastSaved).open();
+      }
+      return;
+    }
+
+    new Notice(stillProcessing > 0 ? "语音还在生成，稍后再检查。" : "没有可下载的语音任务。");
+  }
+
+  private async downloadAudio(
+    url: string,
+    headers?: Record<string, string>,
+    status?: TtsStatusModal,
+    expectedBytes?: number
+  ): Promise<AudioResult> {
     if (url.startsWith("data:")) {
       const [meta, encoded] = url.split(",", 2);
       const mimeType = meta.match(/^data:([^;]+)/)?.[1] || "audio/mpeg";
@@ -672,8 +1037,23 @@ export default class NoteTtsPlugin extends Plugin {
       };
     }
 
-    const response = await requestUrl({ url, method: "GET" });
-    const mimeType = response.headers?.["content-type"] || "audio/mpeg";
+    if (expectedBytes && expectedBytes > 768 * 1024) {
+      const ranged = await this.downloadAudioInRanges(url, headers, expectedBytes, status);
+      if (ranged) {
+        return ranged;
+      }
+    }
+
+    const response = await requestUrlWithRetries(
+      { url, method: "GET", headers },
+      {
+        attempts: 30,
+        baseDelayMs: 2000,
+        errorPrefix: "下载音频时连接中断",
+      }
+    );
+
+    const mimeType = getHeader(response.headers, "content-type") || "audio/mpeg";
     return {
       data: response.arrayBuffer,
       extension: extensionFromMime(mimeType),
@@ -681,7 +1061,67 @@ export default class NoteTtsPlugin extends Plugin {
     };
   }
 
+  private async downloadAudioInRanges(
+    url: string,
+    headers: Record<string, string> | undefined,
+    expectedBytes: number,
+    status?: TtsStatusModal
+  ): Promise<AudioResult | null> {
+    const chunkSize = 512 * 1024;
+    const chunks: ArrayBuffer[] = [];
+    let downloaded = 0;
+
+    while (downloaded < expectedBytes) {
+      const end = Math.min(downloaded + chunkSize - 1, expectedBytes - 1);
+      const start = downloaded;
+      const mergedHeaders = {
+        ...(headers || {}),
+        Range: `bytes=${start}-${end}`,
+      };
+      status?.setStatus(`语音已生成，正在分块下载... ${Math.floor(start / chunkSize) + 1}/${Math.ceil(expectedBytes / chunkSize)}`);
+
+      try {
+        const response = await requestUrlWithRetries(
+          { url, method: "GET", headers: mergedHeaders },
+          {
+            attempts: 12,
+            baseDelayMs: 1500,
+            errorPrefix: "分块下载音频时连接中断",
+          }
+        );
+        const contentRange = getHeader(response.headers, "content-range");
+        if (!contentRange && response.arrayBuffer.byteLength > chunkSize + 4096) {
+          return null;
+        }
+        chunks.push(response.arrayBuffer);
+        downloaded += response.arrayBuffer.byteLength;
+      } catch (error) {
+        console.warn("Range download failed, falling back to normal audio download:", error);
+        return null;
+      }
+    }
+
+    const mimeType = "audio/mp4";
+    return {
+      data: concatenateArrayBuffers(chunks),
+      extension: extensionFromMime(mimeType),
+      mimeType,
+    };
+  }
+
   private async saveAudioFile(sourceFile: TFile, audio: AudioResult) {
+    if (audio.vaultPath) {
+      const synced = await this.waitForVaultFile(audio.vaultPath, undefined, 20000);
+      if (synced) {
+        return synced;
+      }
+      throw new PendingTaskError(`语音已保存在 Mac mini 的 iCloud：${audio.vaultPath}。手机 iCloud 还没同步到，稍后会出现在 TTS Audio 文件夹。`);
+    }
+
+    if (!audio.data) {
+      throw new Error("语音结果没有音频数据。");
+    }
+
     const folder = normalizeFolder(this.settings.outputFolder);
     await ensureFolder(this.app, folder);
 
@@ -689,6 +1129,19 @@ export default class NoteTtsPlugin extends Plugin {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const path = `${folder}/${basename}-${timestamp}.${audio.extension || "mp3"}`;
     return this.app.vault.createBinary(path, audio.data);
+  }
+
+  private async waitForVaultFile(path: string, status?: TtsStatusModal, timeoutMs = 20000): Promise<TFile | null> {
+    const started = Date.now();
+    while (Date.now() - started <= timeoutMs) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) {
+        return file;
+      }
+      status?.setStatus("语音已保存到 iCloud，等待手机同步文件...");
+      await sleep(1000);
+    }
+    return null;
   }
 }
 
@@ -818,10 +1271,12 @@ class AudioResultModal extends Modal {
       startY = event.clientY;
       startLeft = rect.left;
       startTop = rect.top;
-      modal.style.position = "fixed";
-      modal.style.left = `${rect.left}px`;
-      modal.style.top = `${rect.top}px`;
-      modal.style.margin = "0";
+      modal.setCssStyles({
+        position: "fixed",
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        margin: "0",
+      });
       handle.addClass("is-dragging");
       handle.setPointerCapture(event.pointerId);
     };
@@ -833,8 +1288,10 @@ class AudioResultModal extends Modal {
 
       const nextLeft = clamp(startLeft + event.clientX - startX, 8, window.innerWidth - modal.offsetWidth - 8);
       const nextTop = clamp(startTop + event.clientY - startY, 8, window.innerHeight - modal.offsetHeight - 8);
-      modal.style.left = `${nextLeft}px`;
-      modal.style.top = `${nextTop}px`;
+      modal.setCssStyles({
+        left: `${nextLeft}px`,
+        top: `${nextTop}px`,
+      });
     };
 
     const onPointerUp = (event: PointerEvent) => {
@@ -870,10 +1327,16 @@ class NoteTtsSettingTab extends PluginSettingTab {
   }
 
   display() {
+    this.renderSettings();
+  }
+
+  private renderSettings() {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Note TTS" });
+    new Setting(containerEl)
+      .setName("Note TTS")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Provider")
@@ -887,7 +1350,7 @@ class NoteTtsSettingTab extends PluginSettingTab {
           .onChange(async (value: ProviderId) => {
             this.plugin.settings.provider = value;
             await this.plugin.saveSettings();
-            this.display();
+            this.renderSettings();
           })
       );
 
@@ -917,6 +1380,18 @@ class NoteTtsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("分段字符数")
+      .setDesc("大于 0 时，长文本会分段生成再合并，手机端建议 800-1500；填 0 可关闭分段。")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.chunkCharacters ?? DEFAULT_SETTINGS.chunkCharacters))
+          .onChange(async (value) => {
+            this.plugin.settings.chunkCharacters = Number(value) || 0;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("转换前清理 Markdown")
       .setDesc("移除代码块、链接语法和常见 Markdown 标记。")
       .addToggle((toggle) =>
@@ -928,7 +1403,9 @@ class NoteTtsSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "Text cleanup" });
+    new Setting(containerEl)
+      .setName("Text cleanup")
+      .setHeading();
     this.toggleSetting(containerEl, "移除 YAML/frontmatter", "跳过笔记顶部的 date、type、tags 等元数据。", "removeFrontmatter");
     this.toggleSetting(containerEl, "移除标签", "跳过 #tag 和 tags: 字段。", "removeTags");
     this.toggleSetting(containerEl, "移除链接地址", "保留链接文字，但不朗读 URL。", "removeLinks");
@@ -942,6 +1419,42 @@ class NoteTtsSettingTab extends PluginSettingTab {
       "skipLinePatterns"
     );
 
+    new Setting(containerEl)
+      .setName("语音与朗读优化")
+      .setHeading();
+    this.toggleSetting(
+      containerEl,
+      "优化英文缩写朗读",
+      "在连续大写字母（如 SDK、API）之间自动插入空格，防止被读成单个单词或连读。",
+      "optimizeAcronyms"
+    );
+    this.toggleSetting(
+      containerEl,
+      "行尾自动添加停顿",
+      "如果行尾没有标点符号（如标题、列表项），自动添加停顿符号，避免朗读时与下一行内容连在一起。",
+      "addPauseAtLineBreaks"
+    );
+    new Setting(containerEl)
+      .setName("行尾停顿符号")
+      .setDesc("选择在没有标点符号的行尾添加句号（停顿较长）还是逗号（停顿较短）。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("period", "句号 。")
+          .addOption("comma", "逗号 ，")
+          .setValue(this.plugin.settings.lineBreakPauseType)
+          .onChange(async (value: "period" | "comma") => {
+            this.plugin.settings.lineBreakPauseType = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    this.toggleSetting(
+      containerEl,
+      "标点符号后添加空格",
+      "在所有标点符号（如逗号、句号、分号、问号、感叹号、冒号、顿号等）后自动加上空格，帮助 TTS 语音在标点处发出更自然的短停顿。",
+      "addSpaceAfterPunctuation"
+    );
+
     if (this.plugin.settings.provider === "minimax") {
       this.displayMiniMaxSettings(containerEl);
     } else if (this.plugin.settings.provider === "replicate") {
@@ -952,7 +1465,9 @@ class NoteTtsSettingTab extends PluginSettingTab {
   }
 
   private displayMiniMaxSettings(containerEl: HTMLElement) {
-    containerEl.createEl("h3", { text: "MiniMax" });
+    new Setting(containerEl)
+      .setName("MiniMax")
+      .setHeading();
     this.textSetting(containerEl, "API Key", "Bearer token。", "minimaxApiKey", true);
     this.textSetting(containerEl, "Endpoint", "默认使用 HTTP T2A。", "minimaxEndpoint");
     this.textSetting(containerEl, "Model", "例如 speech-2.8-turbo 或 speech-2.8-hd。", "minimaxModel");
@@ -964,7 +1479,9 @@ class NoteTtsSettingTab extends PluginSettingTab {
   }
 
   private displayReplicateSettings(containerEl: HTMLElement) {
-    containerEl.createEl("h3", { text: "Replicate" });
+    new Setting(containerEl)
+      .setName("Replicate")
+      .setHeading();
     this.textSetting(containerEl, "API Token", "Replicate API token。", "replicateApiToken", true);
     this.textSetting(
       containerEl,
@@ -1053,17 +1570,22 @@ class NoteTtsSettingTab extends PluginSettingTab {
       return;
     }
 
-    containerEl.createEl("h4", { text: "Advanced Replicate model" });
+    new Setting(containerEl)
+      .setName("Advanced Replicate model")
+      .setHeading();
     this.textSetting(containerEl, "Model version", "非官方模型需要填写 version hash。", "replicateVersion");
     this.textAreaSetting(containerEl, "Input JSON template", "使用 {{text}} 插入笔记文本。", "replicateInputTemplate");
   }
 
   private displayCustomSettings(containerEl: HTMLElement) {
-    containerEl.createEl("h3", { text: "Custom HTTP" });
+    new Setting(containerEl)
+      .setName("Custom HTTP")
+      .setHeading();
     this.textSetting(containerEl, "Endpoint", "返回二进制音频或 JSON 都可以。", "customEndpoint");
     this.textSetting(containerEl, "Method", "通常是 POST。", "customMethod");
     this.textAreaSetting(containerEl, "Headers JSON template", "使用 {{text}} 插入文本；一般不需要。", "customHeaders");
     this.textAreaSetting(containerEl, "Body JSON template", "使用 {{text}} 插入笔记文本。", "customBodyTemplate");
+    this.numberSetting(containerEl, "Custom chunk characters", "大于 0 时，插件会把长文本拆成多次 Custom HTTP 请求再合并 WAV；手机端建议 40-80。", "customChunkCharacters");
     this.textSetting(containerEl, "Audio URL path", "例如 data.audio_url。", "customAudioUrlPath");
     this.textSetting(containerEl, "Audio hex path", "例如 data.audio。", "customAudioHexPath");
     this.textSetting(containerEl, "Audio base64 path", "例如 data.audio_base64。", "customAudioBase64Path");
@@ -1194,12 +1716,329 @@ function looksLikeJson(contentType: string | undefined) {
   return Boolean(contentType?.toLowerCase().includes("json"));
 }
 
+function getHeader(headers: Record<string, string> | undefined, name: string) {
+  if (!headers) return undefined;
+  const direct = headers[name];
+  if (direct) return direct;
+  const lowerName = name.toLowerCase();
+  const key = Object.keys(headers).find((header) => header.toLowerCase() === lowerName);
+  return key ? headers[key] : undefined;
+}
+
+function looksLikeWav(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer.slice(0, 12));
+  return readAscii(bytes, 0, 4) === "RIFF" && readAscii(bytes, 8, 4) === "WAVE";
+}
+
+function audioHeader(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer.slice(0, 12));
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function extensionFromMime(mimeType: string) {
   const normalized = mimeType.toLowerCase();
   if (normalized.includes("wav")) return "wav";
   if (normalized.includes("flac")) return "flac";
+  if (normalized.includes("mp4") || normalized.includes("m4a") || normalized.includes("aac")) return "m4a";
   if (normalized.includes("mpeg") || normalized.includes("mp3")) return "mp3";
   return "mp3";
+}
+
+function extensionFromPath(path: string) {
+  const match = path.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match?.[1] || "mp3";
+}
+
+function mimeFromExtension(extension: string) {
+  const normalized = extension.toLowerCase();
+  if (normalized === "m4a" || normalized === "mp4" || normalized === "aac") return "audio/mp4";
+  if (normalized === "wav") return "audio/wav";
+  if (normalized === "flac") return "audio/flac";
+  return "audio/mpeg";
+}
+
+function numericValue(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : undefined;
+}
+
+async function requestUrlWithRetries(
+  options: Parameters<typeof requestUrl>[0],
+  config: {
+    attempts?: number;
+    baseDelayMs?: number;
+    errorPrefix?: string;
+    onRetry?: (attempt: number, error: unknown) => void;
+  } = {}
+) {
+  const attempts = Math.max(1, config.attempts || 4);
+  const baseDelayMs = config.baseDelayMs || 1500;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await requestUrl(options);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) {
+        break;
+      }
+      config.onRetry?.(attempt, error);
+      await sleep(baseDelayMs * attempt);
+    }
+  }
+
+  const prefix = config.errorPrefix || "HTTP 请求失败";
+  throw new Error(`${prefix}：${errorMessage(lastError)}`);
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function splitTextForTts(text: string, maxCharacters: number): string[] {
+  const normalized = text.replace(/[ \t]+/g, " ").trim();
+  if (normalized.length <= maxCharacters) {
+    return [normalized];
+  }
+
+  function splitChunks(chunks: string[], level: number): string[] {
+    const result: string[] = [];
+    for (const chunk of chunks) {
+      if (chunk.length <= maxCharacters) {
+        result.push(chunk);
+        continue;
+      }
+
+      let subChunks: string[] = [];
+      if (level === 0) {
+        subChunks = chunk.split(/\n\n+/).map(s => s.trim()).filter(Boolean);
+      } else if (level === 1) {
+        subChunks = chunk.split(/\n+/).map(s => s.trim()).filter(Boolean);
+      } else if (level === 2) {
+        const parts = chunk.split(/([。！？!?]|\.\s+|\.$)/g);
+        for (let i = 0; i < parts.length; i += 2) {
+          const segment = parts[i];
+          const delimiter = parts[i + 1] || "";
+          const combined = (segment + delimiter).trim();
+          if (combined) {
+            subChunks.push(combined);
+          }
+        }
+      } else if (level === 3) {
+        const parts = chunk.split(/([；;，、：:]|,\s+|,$)/g);
+        for (let i = 0; i < parts.length; i += 2) {
+          const segment = parts[i];
+          const delimiter = parts[i + 1] || "";
+          const combined = (segment + delimiter).trim();
+          if (combined) {
+            subChunks.push(combined);
+          }
+        }
+      } else if (level === 4) {
+        const parts = chunk.split(/(\s+)/g);
+        for (let i = 0; i < parts.length; i += 2) {
+          const segment = parts[i];
+          const delimiter = parts[i + 1] || "";
+          const combined = (segment + delimiter).trim();
+          if (combined) {
+            subChunks.push(combined);
+          }
+        }
+      } else {
+        subChunks = hardSplitText(chunk, maxCharacters);
+      }
+
+      if (subChunks.length > 1 || level === 5) {
+        result.push(...splitChunks(subChunks, level + 1));
+      } else {
+        result.push(...splitChunks([chunk], level + 1));
+      }
+    }
+    return result;
+  }
+
+  const finalChunks = splitChunks([normalized], 0);
+
+  const groupedChunks: string[] = [];
+  let currentChunk = "";
+
+  for (const chunk of finalChunks) {
+    if (!currentChunk) {
+      currentChunk = chunk;
+    } else {
+      const separator = currentChunk.endsWith("\n") || chunk.startsWith("\n") ? "\n" : " ";
+      const candidate = currentChunk + separator + chunk;
+      if (candidate.length <= maxCharacters) {
+        currentChunk = candidate;
+      } else {
+        groupedChunks.push(currentChunk);
+        currentChunk = chunk;
+      }
+    }
+  }
+  if (currentChunk) {
+    groupedChunks.push(currentChunk);
+  }
+
+  return groupedChunks.filter(Boolean);
+}
+
+function hardSplitText(text: string, maxCharacters: number) {
+  const chunks: string[] = [];
+  for (let index = 0; index < text.length; index += maxCharacters) {
+    chunks.push(text.slice(index, index + maxCharacters));
+  }
+  return chunks;
+}
+
+function combineAudioResults(audios: AudioResult[], providerName: string): AudioResult {
+  if (!audios.length) {
+    throw new Error(`${providerName} 没有返回可合并的音频。`);
+  }
+  if (audios.length === 1) {
+    return audios[0];
+  }
+  if (audios.some((audio) => !audio.data)) {
+    throw new Error(`${providerName} 返回了已保存文件，无法继续合并分段音频。`);
+  }
+  const audioData = audios.map((audio) => audio.data as ArrayBuffer);
+
+  if (audios.every((audio, index) => audio.mimeType.toLowerCase().includes("wav") || looksLikeWav(audioData[index]))) {
+    return {
+      data: concatenateWavs(audioData),
+      extension: "wav",
+      mimeType: "audio/wav",
+    };
+  }
+
+  if (audios.every((audio) => isMp3Audio(audio))) {
+    return {
+      data: concatenateArrayBuffers(audioData),
+      extension: "mp3",
+      mimeType: "audio/mpeg",
+    };
+  }
+
+  const details = audios
+    .map((audio, index) => `${index + 1}:${audio.mimeType || "unknown"}:${audio.data ? audioHeader(audio.data) : "no-data"}`)
+    .join(", ");
+  throw new Error(`${providerName} 分段音频格式不一致，无法合并。收到：${details}`);
+}
+
+function isMp3Audio(audio: AudioResult) {
+  const mimeType = audio.mimeType.toLowerCase();
+  return audio.extension.toLowerCase() === "mp3" || mimeType.includes("mpeg") || mimeType.includes("mp3");
+}
+
+function concatenateArrayBuffers(buffers: ArrayBuffer[]) {
+  const byteLength = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+  const output = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const buffer of buffers) {
+    output.set(new Uint8Array(buffer), offset);
+    offset += buffer.byteLength;
+  }
+  return output.buffer;
+}
+
+function concatenateWavs(buffers: ArrayBuffer[]) {
+  if (!buffers.length) {
+    throw new Error("没有可合并的 WAV 音频。");
+  }
+
+  const chunks = buffers.map(parseWav);
+  const first = chunks[0];
+  const compatible = chunks.every((chunk) =>
+    chunk.audioFormat === first.audioFormat &&
+    chunk.channels === first.channels &&
+    chunk.sampleRate === first.sampleRate &&
+    chunk.bitsPerSample === first.bitsPerSample
+  );
+  if (!compatible) {
+    throw new Error("WAV 分段格式不一致，无法合并。");
+  }
+
+  const dataSize = chunks.reduce((sum, chunk) => sum + chunk.data.byteLength, 0);
+  const output = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(output);
+  const bytes = new Uint8Array(output);
+  writeAscii(bytes, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(bytes, 8, "WAVE");
+  writeAscii(bytes, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, first.audioFormat, true);
+  view.setUint16(22, first.channels, true);
+  view.setUint32(24, first.sampleRate, true);
+  view.setUint32(28, first.byteRate, true);
+  view.setUint16(32, first.blockAlign, true);
+  view.setUint16(34, first.bitsPerSample, true);
+  writeAscii(bytes, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (const chunk of chunks) {
+    bytes.set(new Uint8Array(chunk.data), offset);
+    offset += chunk.data.byteLength;
+  }
+  return output;
+}
+
+function parseWav(buffer: ArrayBuffer) {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  if (readAscii(bytes, 0, 4) !== "RIFF" || readAscii(bytes, 8, 4) !== "WAVE") {
+    throw new Error("Custom 分段响应不是有效 WAV。");
+  }
+
+  let offset = 12;
+  let fmt: {
+    audioFormat: number;
+    channels: number;
+    sampleRate: number;
+    byteRate: number;
+    blockAlign: number;
+    bitsPerSample: number;
+  } | null = null;
+  let data: ArrayBuffer | null = null;
+
+  while (offset + 8 <= buffer.byteLength) {
+    const id = readAscii(bytes, offset, 4);
+    const size = view.getUint32(offset + 4, true);
+    const start = offset + 8;
+    if (id === "fmt ") {
+      fmt = {
+        audioFormat: view.getUint16(start, true),
+        channels: view.getUint16(start + 2, true),
+        sampleRate: view.getUint32(start + 4, true),
+        byteRate: view.getUint32(start + 8, true),
+        blockAlign: view.getUint16(start + 12, true),
+        bitsPerSample: view.getUint16(start + 14, true),
+      };
+    } else if (id === "data") {
+      data = buffer.slice(start, start + size);
+      break;
+    }
+    offset = start + size + (size % 2);
+  }
+
+  if (!fmt || !data) {
+    throw new Error("WAV 缺少 fmt 或 data chunk。");
+  }
+  return { ...fmt, data };
+}
+
+function readAscii(bytes: Uint8Array, offset: number, length: number) {
+  return String.fromCharCode(...bytes.slice(offset, offset + length));
+}
+
+function writeAscii(bytes: Uint8Array, offset: number, value: string) {
+  for (let index = 0; index < value.length; index++) {
+    bytes[offset + index] = value.charCodeAt(index);
+  }
 }
 
 function normalizeFolder(folder: string) {

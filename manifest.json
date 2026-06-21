@@ -1,7 +1,7 @@
 {
   "id": "note-tts",
   "name": "Note TTS",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minAppVersion": "1.5.0",
   "description": "Convert the current note or selected text to MP3 audio through user-configured TTS APIs.",
   "author": "sourit2001",
