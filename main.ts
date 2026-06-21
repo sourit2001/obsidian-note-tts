@@ -1335,10 +1335,6 @@ class NoteTtsSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("General")
-      .setHeading();
-
-    new Setting(containerEl)
       .setName("Provider")
       .setDesc("选择用哪个 API 生成语音。")
       .addDropdown((dropdown) =>
