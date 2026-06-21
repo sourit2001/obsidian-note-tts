@@ -1335,7 +1335,7 @@ class NoteTtsSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("Note TTS")
+      .setName("General")
       .setHeading();
 
     new Setting(containerEl)
