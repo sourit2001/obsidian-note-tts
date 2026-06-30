@@ -2,6 +2,7 @@ import {
   addIcon,
   App,
   Editor,
+  getLanguage,
   Menu,
   MarkdownView,
   Modal,
@@ -14,6 +15,7 @@ import {
 } from "obsidian";
 
 type ProviderId = "minimax" | "replicate" | "custom";
+type SettingsLanguage = "auto" | "zh" | "en";
 
 const REPLICATE_MINIMAX_MODEL = "minimax/speech-2.8-turbo";
 const REPLICATE_CUSTOM_VOICE = "custom";
@@ -60,6 +62,7 @@ const REPLICATE_MINIMAX_VOICES = [
 ];
 
 interface NoteTtsSettings {
+  settingsLanguage: SettingsLanguage;
   provider: ProviderId;
   outputFolder: string;
   maxCharacters: number;
@@ -106,6 +109,7 @@ interface NoteTtsSettings {
 }
 
 const DEFAULT_SETTINGS: NoteTtsSettings = {
+  settingsLanguage: "auto",
   provider: "minimax",
   outputFolder: "TTS Audio",
   maxCharacters: 10000,
@@ -180,6 +184,226 @@ class PendingTaskError extends Error {
     super(message);
     this.name = "PendingTaskError";
   }
+}
+
+type SettingsTextKey =
+  | "settingsLanguageName"
+  | "settingsLanguageDesc"
+  | "settingsLanguageAuto"
+  | "settingsLanguageZh"
+  | "settingsLanguageEn"
+  | "providerDesc"
+  | "outputFolderName"
+  | "outputFolderDesc"
+  | "maxCharactersName"
+  | "maxCharactersDesc"
+  | "chunkCharactersName"
+  | "chunkCharactersDesc"
+  | "stripMarkdownName"
+  | "stripMarkdownDesc"
+  | "textCleanupHeading"
+  | "removeFrontmatterName"
+  | "removeFrontmatterDesc"
+  | "removeTagsName"
+  | "removeTagsDesc"
+  | "removeLinksName"
+  | "removeLinksDesc"
+  | "removeUrlsName"
+  | "removeUrlsDesc"
+  | "removeEmbedsName"
+  | "removeEmbedsDesc"
+  | "removeHtmlCommentsName"
+  | "removeHtmlCommentsDesc"
+  | "skipLinePatternsName"
+  | "skipLinePatternsDesc"
+  | "voiceOptimizationHeading"
+  | "optimizeAcronymsName"
+  | "optimizeAcronymsDesc"
+  | "addPauseAtLineBreaksName"
+  | "addPauseAtLineBreaksDesc"
+  | "lineBreakPauseTypeName"
+  | "lineBreakPauseTypeDesc"
+  | "lineBreakPausePeriod"
+  | "lineBreakPauseComma"
+  | "addSpaceAfterPunctuationName"
+  | "addSpaceAfterPunctuationDesc"
+  | "minimaxApiKeyDesc"
+  | "minimaxEndpointDesc"
+  | "minimaxModelDesc"
+  | "minimaxVoiceIdDesc"
+  | "minimaxLanguageBoostDesc"
+  | "speedDesc"
+  | "volumeDesc"
+  | "pitchDesc"
+  | "replicateApiTokenDesc"
+  | "replicateModelDesc"
+  | "replicateVoiceDesc"
+  | "replicateCustomVoiceIdDesc"
+  | "replicateLanguagePreferenceDesc"
+  | "replicateEmotionDesc"
+  | "replicateSpeedDesc"
+  | "replicateVolumeDesc"
+  | "replicatePitchDesc"
+  | "advancedReplicateHeading"
+  | "replicateVersionDesc"
+  | "replicateInputTemplateDesc"
+  | "customEndpointDesc"
+  | "customMethodDesc"
+  | "customHeadersDesc"
+  | "customBodyTemplateDesc"
+  | "customChunkCharactersDesc"
+  | "customAudioUrlPathDesc"
+  | "customAudioHexPathDesc"
+  | "customAudioBase64PathDesc";
+
+const SETTINGS_TEXT: Record<"zh" | "en", Record<SettingsTextKey, string>> = {
+  zh: {
+    settingsLanguageName: "设置页语言",
+    settingsLanguageDesc: "选择此插件设置页使用的语言。Auto 会跟随 Obsidian 界面语言。",
+    settingsLanguageAuto: "Auto（跟随 Obsidian）",
+    settingsLanguageZh: "中文",
+    settingsLanguageEn: "English",
+    providerDesc: "选择用哪个 API 生成语音。",
+    outputFolderName: "输出文件夹",
+    outputFolderDesc: "生成的 MP3 会保存到 vault 中的这个文件夹。",
+    maxCharactersName: "最大字符数",
+    maxCharactersDesc: "避免把特别长的笔记误发给同步 API。",
+    chunkCharactersName: "分段字符数",
+    chunkCharactersDesc: "大于 0 时，长文本会分段生成再合并，手机端建议 800-1500；填 0 可关闭分段。",
+    stripMarkdownName: "转换前清理 Markdown",
+    stripMarkdownDesc: "移除代码块、链接语法和常见 Markdown 标记。",
+    textCleanupHeading: "文本清理",
+    removeFrontmatterName: "移除 YAML/frontmatter",
+    removeFrontmatterDesc: "跳过笔记顶部的 date、type、tags 等元数据。",
+    removeTagsName: "移除标签",
+    removeTagsDesc: "跳过 #tag 和 tags: 字段。",
+    removeLinksName: "移除链接地址",
+    removeLinksDesc: "保留链接文字，但不朗读 URL。",
+    removeUrlsName: "移除裸 URL",
+    removeUrlsDesc: "跳过直接写在正文里的 https:// 链接。",
+    removeEmbedsName: "移除图片和嵌入",
+    removeEmbedsDesc: "跳过 Markdown 图片与 Obsidian 嵌入。",
+    removeHtmlCommentsName: "移除 HTML 注释",
+    removeHtmlCommentsDesc: "跳过 <!-- comment --> 内容。",
+    skipLinePatternsName: "跳过整行的规则",
+    skipLinePatternsDesc: "每行一个正则表达式。匹配到的整行不会送去生成语音。",
+    voiceOptimizationHeading: "语音与朗读优化",
+    optimizeAcronymsName: "优化英文缩写朗读",
+    optimizeAcronymsDesc: "在连续大写字母（如 SDK、API）之间自动插入空格，防止被读成单个单词或连读。",
+    addPauseAtLineBreaksName: "行尾自动添加停顿",
+    addPauseAtLineBreaksDesc: "如果行尾没有标点符号（如标题、列表项），自动添加停顿符号，避免朗读时与下一行内容连在一起。",
+    lineBreakPauseTypeName: "行尾停顿符号",
+    lineBreakPauseTypeDesc: "选择在没有标点符号的行尾添加句号（停顿较长）还是逗号（停顿较短）。",
+    lineBreakPausePeriod: "句号 。",
+    lineBreakPauseComma: "逗号 ，",
+    addSpaceAfterPunctuationName: "标点符号后添加空格",
+    addSpaceAfterPunctuationDesc: "在所有标点符号（如逗号、句号、分号、问号、感叹号、冒号、顿号等）后自动加上空格，帮助 TTS 语音在标点处发出更自然的短停顿。",
+    minimaxApiKeyDesc: "Bearer token。",
+    minimaxEndpointDesc: "默认使用 HTTP T2A。",
+    minimaxModelDesc: "例如 speech-2.8-turbo 或 speech-2.8-hd。",
+    minimaxVoiceIdDesc: "系统 voice_id 或你自己的克隆 voice_id。",
+    minimaxLanguageBoostDesc: "中文可用 Chinese，自动识别用 auto。",
+    speedDesc: "语速。",
+    volumeDesc: "音量。",
+    pitchDesc: "音高。",
+    replicateApiTokenDesc: "Replicate API token。",
+    replicateModelDesc: "默认使用 Replicate 官方 MiniMax Speech 2.8 Turbo；其他模型可填 owner/name。",
+    replicateVoiceDesc: "选择 Custom 时，会使用下一项填写的自定义 voice_id。",
+    replicateCustomVoiceIdDesc: "当 Voice 选择 Custom 时使用，用于 MiniMax voice cloning 返回的 voice_id。",
+    replicateLanguagePreferenceDesc: "默认 Auto，让 MiniMax 自动判断语言。",
+    replicateEmotionDesc: "默认 Auto，让 MiniMax 自动选择表达情绪。",
+    replicateSpeedDesc: "语速，Replicate MiniMax 支持 0.5 到 2。",
+    replicateVolumeDesc: "音量，Replicate MiniMax 支持 0 到 10。",
+    replicatePitchDesc: "音高，Replicate MiniMax 支持 -12 到 12。",
+    advancedReplicateHeading: "高级 Replicate 模型",
+    replicateVersionDesc: "非官方模型需要填写 version hash。",
+    replicateInputTemplateDesc: "使用 {{text}} 插入笔记文本。",
+    customEndpointDesc: "返回二进制音频或 JSON 都可以。",
+    customMethodDesc: "通常是 POST。",
+    customHeadersDesc: "使用 {{text}} 插入文本；一般不需要。",
+    customBodyTemplateDesc: "使用 {{text}} 插入笔记文本。",
+    customChunkCharactersDesc: "大于 0 时，插件会把长文本拆成多次 Custom HTTP 请求再合并 WAV；手机端建议 40-80。",
+    customAudioUrlPathDesc: "例如 data.audio_url。",
+    customAudioHexPathDesc: "例如 data.audio。",
+    customAudioBase64PathDesc: "例如 data.audio_base64。",
+  },
+  en: {
+    settingsLanguageName: "Settings language",
+    settingsLanguageDesc: "Choose the language used on this plugin settings page. Auto follows Obsidian's interface language.",
+    settingsLanguageAuto: "Auto (Obsidian language)",
+    settingsLanguageZh: "Chinese",
+    settingsLanguageEn: "English",
+    providerDesc: "Choose which API provider generates speech.",
+    outputFolderName: "Output folder",
+    outputFolderDesc: "Generated MP3 files are saved to this folder inside your vault.",
+    maxCharactersName: "Maximum characters",
+    maxCharactersDesc: "Prevents accidentally sending very long notes to a synchronous API.",
+    chunkCharactersName: "Chunk characters",
+    chunkCharactersDesc: "When greater than 0, long text is generated in chunks and merged. Recommended on mobile: 800-1500. Use 0 to disable chunking.",
+    stripMarkdownName: "Clean Markdown before conversion",
+    stripMarkdownDesc: "Removes code blocks, link syntax, and common Markdown markers.",
+    textCleanupHeading: "Text cleanup",
+    removeFrontmatterName: "Remove YAML/frontmatter",
+    removeFrontmatterDesc: "Skips metadata at the top of notes, such as date, type, and tags.",
+    removeTagsName: "Remove tags",
+    removeTagsDesc: "Skips #tag entries and tags: fields.",
+    removeLinksName: "Remove link URLs",
+    removeLinksDesc: "Keeps link text but does not read URLs aloud.",
+    removeUrlsName: "Remove bare URLs",
+    removeUrlsDesc: "Skips https:// links written directly in the note body.",
+    removeEmbedsName: "Remove images and embeds",
+    removeEmbedsDesc: "Skips Markdown images and Obsidian embeds.",
+    removeHtmlCommentsName: "Remove HTML comments",
+    removeHtmlCommentsDesc: "Skips <!-- comment --> content.",
+    skipLinePatternsName: "Skip whole-line rules",
+    skipLinePatternsDesc: "One regular expression per line. Matching lines are not sent to the speech API.",
+    voiceOptimizationHeading: "Voice and reading optimization",
+    optimizeAcronymsName: "Optimize English acronyms",
+    optimizeAcronymsDesc: "Automatically inserts spaces between consecutive uppercase letters, such as SDK and API, so they are not read as a single word or run together.",
+    addPauseAtLineBreaksName: "Add pauses at line ends",
+    addPauseAtLineBreaksDesc: "If a line ends without punctuation, such as headings or list items, add a pause mark so it does not run into the next line.",
+    lineBreakPauseTypeName: "Line-end pause mark",
+    lineBreakPauseTypeDesc: "Choose whether lines without punctuation end with a period for a longer pause or a comma for a shorter pause.",
+    lineBreakPausePeriod: "Period .",
+    lineBreakPauseComma: "Comma ,",
+    addSpaceAfterPunctuationName: "Add spaces after punctuation",
+    addSpaceAfterPunctuationDesc: "Adds a space after punctuation marks, such as commas, periods, semicolons, question marks, exclamation marks, colons, and Chinese enumeration commas, to help TTS produce more natural short pauses.",
+    minimaxApiKeyDesc: "Bearer token.",
+    minimaxEndpointDesc: "Uses HTTP T2A by default.",
+    minimaxModelDesc: "For example, speech-2.8-turbo or speech-2.8-hd.",
+    minimaxVoiceIdDesc: "A system voice_id or your own cloned voice_id.",
+    minimaxLanguageBoostDesc: "Use Chinese for Chinese text, or auto for automatic detection.",
+    speedDesc: "Speech speed.",
+    volumeDesc: "Volume.",
+    pitchDesc: "Pitch.",
+    replicateApiTokenDesc: "Replicate API token.",
+    replicateModelDesc: "Uses Replicate's official MiniMax Speech 2.8 Turbo model by default. Other models can use owner/name.",
+    replicateVoiceDesc: "When Custom is selected, the next setting supplies the custom voice_id.",
+    replicateCustomVoiceIdDesc: "Used when Voice is set to Custom. This is the voice_id returned by MiniMax voice cloning.",
+    replicateLanguagePreferenceDesc: "Auto lets MiniMax detect the language automatically.",
+    replicateEmotionDesc: "Auto lets MiniMax choose the expressive emotion automatically.",
+    replicateSpeedDesc: "Speech speed. Replicate MiniMax supports 0.5 to 2.",
+    replicateVolumeDesc: "Volume. Replicate MiniMax supports 0 to 10.",
+    replicatePitchDesc: "Pitch. Replicate MiniMax supports -12 to 12.",
+    advancedReplicateHeading: "Advanced Replicate model",
+    replicateVersionDesc: "Unofficial models need a version hash.",
+    replicateInputTemplateDesc: "Use {{text}} to insert the note text.",
+    customEndpointDesc: "Can return either binary audio or JSON.",
+    customMethodDesc: "Usually POST.",
+    customHeadersDesc: "Use {{text}} to insert text. Usually not needed.",
+    customBodyTemplateDesc: "Use {{text}} to insert the note text.",
+    customChunkCharactersDesc: "When greater than 0, the plugin splits long text into multiple Custom HTTP requests and merges WAV files. Recommended on mobile: 40-80.",
+    customAudioUrlPathDesc: "For example, data.audio_url.",
+    customAudioHexPathDesc: "For example, data.audio.",
+    customAudioBase64PathDesc: "For example, data.audio_base64.",
+  },
+};
+
+function getSettingsDisplayLanguage(selected: SettingsLanguage): "zh" | "en" {
+  if (selected === "zh" || selected === "en") {
+    return selected;
+  }
+  return getLanguage().toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
 export default class NoteTtsPlugin extends Plugin {
@@ -1333,10 +1557,28 @@ class NoteTtsSettingTab extends PluginSettingTab {
   private renderSettings() {
     const { containerEl } = this;
     containerEl.empty();
+    const language = getSettingsDisplayLanguage(this.plugin.settings.settingsLanguage);
+    const t = (key: SettingsTextKey) => SETTINGS_TEXT[language][key];
+
+    new Setting(containerEl)
+      .setName(t("settingsLanguageName"))
+      .setDesc(t("settingsLanguageDesc"))
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("auto", t("settingsLanguageAuto"))
+          .addOption("zh", t("settingsLanguageZh"))
+          .addOption("en", t("settingsLanguageEn"))
+          .setValue(this.plugin.settings.settingsLanguage)
+          .onChange(async (value: SettingsLanguage) => {
+            this.plugin.settings.settingsLanguage = value;
+            await this.plugin.saveSettings();
+            this.renderSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("Provider")
-      .setDesc("选择用哪个 API 生成语音。")
+      .setDesc(t("providerDesc"))
       .addDropdown((dropdown) =>
         dropdown
           .addOption("minimax", "MiniMax")
@@ -1351,8 +1593,8 @@ class NoteTtsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("输出文件夹")
-      .setDesc("生成的 MP3 会保存到 vault 中的这个文件夹。")
+      .setName(t("outputFolderName"))
+      .setDesc(t("outputFolderDesc"))
       .addText((text) =>
         text
           .setPlaceholder("TTS Audio")
@@ -1364,8 +1606,8 @@ class NoteTtsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("最大字符数")
-      .setDesc("避免把特别长的笔记误发给同步 API。")
+      .setName(t("maxCharactersName"))
+      .setDesc(t("maxCharactersDesc"))
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.maxCharacters))
@@ -1376,8 +1618,8 @@ class NoteTtsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("分段字符数")
-      .setDesc("大于 0 时，长文本会分段生成再合并，手机端建议 800-1500；填 0 可关闭分段。")
+      .setName(t("chunkCharactersName"))
+      .setDesc(t("chunkCharactersDesc"))
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.chunkCharacters ?? DEFAULT_SETTINGS.chunkCharacters))
@@ -1388,8 +1630,8 @@ class NoteTtsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("转换前清理 Markdown")
-      .setDesc("移除代码块、链接语法和常见 Markdown 标记。")
+      .setName(t("stripMarkdownName"))
+      .setDesc(t("stripMarkdownDesc"))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.stripMarkdown)
@@ -1400,43 +1642,43 @@ class NoteTtsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Text cleanup")
+      .setName(t("textCleanupHeading"))
       .setHeading();
-    this.toggleSetting(containerEl, "移除 YAML/frontmatter", "跳过笔记顶部的 date、type、tags 等元数据。", "removeFrontmatter");
-    this.toggleSetting(containerEl, "移除标签", "跳过 #tag 和 tags: 字段。", "removeTags");
-    this.toggleSetting(containerEl, "移除链接地址", "保留链接文字，但不朗读 URL。", "removeLinks");
-    this.toggleSetting(containerEl, "移除裸 URL", "跳过直接写在正文里的 https:// 链接。", "removeUrls");
-    this.toggleSetting(containerEl, "移除图片和嵌入", "跳过 Markdown 图片与 Obsidian 嵌入。", "removeEmbeds");
-    this.toggleSetting(containerEl, "移除 HTML 注释", "跳过 <!-- comment --> 内容。", "removeHtmlComments");
+    this.toggleSetting(containerEl, t("removeFrontmatterName"), t("removeFrontmatterDesc"), "removeFrontmatter");
+    this.toggleSetting(containerEl, t("removeTagsName"), t("removeTagsDesc"), "removeTags");
+    this.toggleSetting(containerEl, t("removeLinksName"), t("removeLinksDesc"), "removeLinks");
+    this.toggleSetting(containerEl, t("removeUrlsName"), t("removeUrlsDesc"), "removeUrls");
+    this.toggleSetting(containerEl, t("removeEmbedsName"), t("removeEmbedsDesc"), "removeEmbeds");
+    this.toggleSetting(containerEl, t("removeHtmlCommentsName"), t("removeHtmlCommentsDesc"), "removeHtmlComments");
     this.textAreaSetting(
       containerEl,
-      "跳过整行的规则",
-      "每行一个正则表达式。匹配到的整行不会送去生成语音。",
+      t("skipLinePatternsName"),
+      t("skipLinePatternsDesc"),
       "skipLinePatterns"
     );
 
     new Setting(containerEl)
-      .setName("语音与朗读优化")
+      .setName(t("voiceOptimizationHeading"))
       .setHeading();
     this.toggleSetting(
       containerEl,
-      "优化英文缩写朗读",
-      "在连续大写字母（如 SDK、API）之间自动插入空格，防止被读成单个单词或连读。",
+      t("optimizeAcronymsName"),
+      t("optimizeAcronymsDesc"),
       "optimizeAcronyms"
     );
     this.toggleSetting(
       containerEl,
-      "行尾自动添加停顿",
-      "如果行尾没有标点符号（如标题、列表项），自动添加停顿符号，避免朗读时与下一行内容连在一起。",
+      t("addPauseAtLineBreaksName"),
+      t("addPauseAtLineBreaksDesc"),
       "addPauseAtLineBreaks"
     );
     new Setting(containerEl)
-      .setName("行尾停顿符号")
-      .setDesc("选择在没有标点符号的行尾添加句号（停顿较长）还是逗号（停顿较短）。")
+      .setName(t("lineBreakPauseTypeName"))
+      .setDesc(t("lineBreakPauseTypeDesc"))
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("period", "句号 。")
-          .addOption("comma", "逗号 ，")
+          .addOption("period", t("lineBreakPausePeriod"))
+          .addOption("comma", t("lineBreakPauseComma"))
           .setValue(this.plugin.settings.lineBreakPauseType)
           .onChange(async (value: "period" | "comma") => {
             this.plugin.settings.lineBreakPauseType = value;
@@ -1446,43 +1688,43 @@ class NoteTtsSettingTab extends PluginSettingTab {
 
     this.toggleSetting(
       containerEl,
-      "标点符号后添加空格",
-      "在所有标点符号（如逗号、句号、分号、问号、感叹号、冒号、顿号等）后自动加上空格，帮助 TTS 语音在标点处发出更自然的短停顿。",
+      t("addSpaceAfterPunctuationName"),
+      t("addSpaceAfterPunctuationDesc"),
       "addSpaceAfterPunctuation"
     );
 
     if (this.plugin.settings.provider === "minimax") {
-      this.displayMiniMaxSettings(containerEl);
+      this.displayMiniMaxSettings(containerEl, t);
     } else if (this.plugin.settings.provider === "replicate") {
-      this.displayReplicateSettings(containerEl);
+      this.displayReplicateSettings(containerEl, t);
     } else {
-      this.displayCustomSettings(containerEl);
+      this.displayCustomSettings(containerEl, t);
     }
   }
 
-  private displayMiniMaxSettings(containerEl: HTMLElement) {
+  private displayMiniMaxSettings(containerEl: HTMLElement, t: (key: SettingsTextKey) => string) {
     new Setting(containerEl)
       .setName("MiniMax")
       .setHeading();
-    this.textSetting(containerEl, "API Key", "Bearer token。", "minimaxApiKey", true);
-    this.textSetting(containerEl, "Endpoint", "默认使用 HTTP T2A。", "minimaxEndpoint");
-    this.textSetting(containerEl, "Model", "例如 speech-2.8-turbo 或 speech-2.8-hd。", "minimaxModel");
-    this.textSetting(containerEl, "Voice ID", "系统 voice_id 或你自己的克隆 voice_id。", "minimaxVoiceId");
-    this.textSetting(containerEl, "Language boost", "中文可用 Chinese，自动识别用 auto。", "minimaxLanguageBoost");
-    this.numberSetting(containerEl, "Speed", "语速。", "minimaxSpeed");
-    this.numberSetting(containerEl, "Volume", "音量。", "minimaxVolume");
-    this.numberSetting(containerEl, "Pitch", "音高。", "minimaxPitch");
+    this.textSetting(containerEl, "API Key", t("minimaxApiKeyDesc"), "minimaxApiKey", true);
+    this.textSetting(containerEl, "Endpoint", t("minimaxEndpointDesc"), "minimaxEndpoint");
+    this.textSetting(containerEl, "Model", t("minimaxModelDesc"), "minimaxModel");
+    this.textSetting(containerEl, "Voice ID", t("minimaxVoiceIdDesc"), "minimaxVoiceId");
+    this.textSetting(containerEl, "Language boost", t("minimaxLanguageBoostDesc"), "minimaxLanguageBoost");
+    this.numberSetting(containerEl, "Speed", t("speedDesc"), "minimaxSpeed");
+    this.numberSetting(containerEl, "Volume", t("volumeDesc"), "minimaxVolume");
+    this.numberSetting(containerEl, "Pitch", t("pitchDesc"), "minimaxPitch");
   }
 
-  private displayReplicateSettings(containerEl: HTMLElement) {
+  private displayReplicateSettings(containerEl: HTMLElement, t: (key: SettingsTextKey) => string) {
     new Setting(containerEl)
       .setName("Replicate")
       .setHeading();
-    this.textSetting(containerEl, "API Token", "Replicate API token。", "replicateApiToken", true);
+    this.textSetting(containerEl, "API Token", t("replicateApiTokenDesc"), "replicateApiToken", true);
     this.textSetting(
       containerEl,
       "Model",
-      "默认使用 Replicate 官方 MiniMax Speech 2.8 Turbo；其他模型可填 owner/name。",
+      t("replicateModelDesc"),
       "replicateModel"
     );
 
@@ -1495,7 +1737,7 @@ class NoteTtsSettingTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName("Voice")
-        .setDesc("选择 Custom 时，会使用下一项填写的自定义 voice_id。")
+        .setDesc(t("replicateVoiceDesc"))
         .addDropdown((dropdown) => {
           dropdown.addOption(REPLICATE_CUSTOM_VOICE, "Custom");
           for (const voice of REPLICATE_MINIMAX_VOICES) {
@@ -1512,13 +1754,13 @@ class NoteTtsSettingTab extends PluginSettingTab {
       this.textSetting(
         containerEl,
         "Custom voice ID",
-        "当 Voice 选择 Custom 时使用，用于 MiniMax voice cloning 返回的 voice_id。",
+        t("replicateCustomVoiceIdDesc"),
         "replicateCustomVoiceId"
       );
 
       new Setting(containerEl)
         .setName("Language preference")
-        .setDesc("默认 Auto，让 MiniMax 自动判断语言。")
+        .setDesc(t("replicateLanguagePreferenceDesc"))
         .addDropdown((dropdown) =>
           dropdown
             .addOption("None", "Auto")
@@ -1540,7 +1782,7 @@ class NoteTtsSettingTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName("Emotion")
-        .setDesc("默认 Auto，让 MiniMax 自动选择表达情绪。")
+        .setDesc(t("replicateEmotionDesc"))
         .addDropdown((dropdown) =>
           dropdown
             .addOption("auto", "Auto")
@@ -1560,31 +1802,31 @@ class NoteTtsSettingTab extends PluginSettingTab {
             })
         );
 
-      this.numberSetting(containerEl, "Speed", "语速，Replicate MiniMax 支持 0.5 到 2。", "replicateSpeed");
-      this.numberSetting(containerEl, "Volume", "音量，Replicate MiniMax 支持 0 到 10。", "replicateVolume");
-      this.numberSetting(containerEl, "Pitch", "音高，Replicate MiniMax 支持 -12 到 12。", "replicatePitch");
+      this.numberSetting(containerEl, "Speed", t("replicateSpeedDesc"), "replicateSpeed");
+      this.numberSetting(containerEl, "Volume", t("replicateVolumeDesc"), "replicateVolume");
+      this.numberSetting(containerEl, "Pitch", t("replicatePitchDesc"), "replicatePitch");
       return;
     }
 
     new Setting(containerEl)
-      .setName("Advanced Replicate model")
+      .setName(t("advancedReplicateHeading"))
       .setHeading();
-    this.textSetting(containerEl, "Model version", "非官方模型需要填写 version hash。", "replicateVersion");
-    this.textAreaSetting(containerEl, "Input JSON template", "使用 {{text}} 插入笔记文本。", "replicateInputTemplate");
+    this.textSetting(containerEl, "Model version", t("replicateVersionDesc"), "replicateVersion");
+    this.textAreaSetting(containerEl, "Input JSON template", t("replicateInputTemplateDesc"), "replicateInputTemplate");
   }
 
-  private displayCustomSettings(containerEl: HTMLElement) {
+  private displayCustomSettings(containerEl: HTMLElement, t: (key: SettingsTextKey) => string) {
     new Setting(containerEl)
       .setName("Custom HTTP")
       .setHeading();
-    this.textSetting(containerEl, "Endpoint", "返回二进制音频或 JSON 都可以。", "customEndpoint");
-    this.textSetting(containerEl, "Method", "通常是 POST。", "customMethod");
-    this.textAreaSetting(containerEl, "Headers JSON template", "使用 {{text}} 插入文本；一般不需要。", "customHeaders");
-    this.textAreaSetting(containerEl, "Body JSON template", "使用 {{text}} 插入笔记文本。", "customBodyTemplate");
-    this.numberSetting(containerEl, "Custom chunk characters", "大于 0 时，插件会把长文本拆成多次 Custom HTTP 请求再合并 WAV；手机端建议 40-80。", "customChunkCharacters");
-    this.textSetting(containerEl, "Audio URL path", "例如 data.audio_url。", "customAudioUrlPath");
-    this.textSetting(containerEl, "Audio hex path", "例如 data.audio。", "customAudioHexPath");
-    this.textSetting(containerEl, "Audio base64 path", "例如 data.audio_base64。", "customAudioBase64Path");
+    this.textSetting(containerEl, "Endpoint", t("customEndpointDesc"), "customEndpoint");
+    this.textSetting(containerEl, "Method", t("customMethodDesc"), "customMethod");
+    this.textAreaSetting(containerEl, "Headers JSON template", t("customHeadersDesc"), "customHeaders");
+    this.textAreaSetting(containerEl, "Body JSON template", t("customBodyTemplateDesc"), "customBodyTemplate");
+    this.numberSetting(containerEl, "Custom chunk characters", t("customChunkCharactersDesc"), "customChunkCharacters");
+    this.textSetting(containerEl, "Audio URL path", t("customAudioUrlPathDesc"), "customAudioUrlPath");
+    this.textSetting(containerEl, "Audio hex path", t("customAudioHexPathDesc"), "customAudioHexPath");
+    this.textSetting(containerEl, "Audio base64 path", t("customAudioBase64PathDesc"), "customAudioBase64Path");
   }
 
   private textSetting(
