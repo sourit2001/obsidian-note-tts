@@ -2,7 +2,6 @@ import {
   addIcon,
   App,
   Editor,
-  getLanguage,
   Menu,
   MarkdownView,
   Modal,
@@ -259,8 +258,8 @@ type SettingsTextKey =
 const SETTINGS_TEXT: Record<"zh" | "en", Record<SettingsTextKey, string>> = {
   zh: {
     settingsLanguageName: "设置页语言",
-    settingsLanguageDesc: "选择此插件设置页使用的语言。Auto 会跟随 Obsidian 界面语言。",
-    settingsLanguageAuto: "Auto（跟随 Obsidian）",
+    settingsLanguageDesc: "选择此插件设置页使用的语言。Auto 默认显示英文，中文可手动选择。",
+    settingsLanguageAuto: "Auto（默认 English）",
     settingsLanguageZh: "中文",
     settingsLanguageEn: "English",
     providerDesc: "选择用哪个 API 生成语音。",
@@ -329,8 +328,8 @@ const SETTINGS_TEXT: Record<"zh" | "en", Record<SettingsTextKey, string>> = {
   },
   en: {
     settingsLanguageName: "Settings language",
-    settingsLanguageDesc: "Choose the language used on this plugin settings page. Auto follows Obsidian's interface language.",
-    settingsLanguageAuto: "Auto (Obsidian language)",
+    settingsLanguageDesc: "Choose the language used on this plugin settings page. Auto defaults to English; Chinese can be selected manually.",
+    settingsLanguageAuto: "Auto (English default)",
     settingsLanguageZh: "Chinese",
     settingsLanguageEn: "English",
     providerDesc: "Choose which API provider generates speech.",
@@ -403,7 +402,7 @@ function getSettingsDisplayLanguage(selected: SettingsLanguage): "zh" | "en" {
   if (selected === "zh" || selected === "en") {
     return selected;
   }
-  return getLanguage().toLowerCase().startsWith("zh") ? "zh" : "en";
+  return "en";
 }
 
 export default class NoteTtsPlugin extends Plugin {
